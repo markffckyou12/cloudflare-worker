@@ -1,0 +1,34 @@
+name = "legal-ops-slack-fastpath"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+[vars]
+# Your existing Apps Script slack-service Web App URL — the same /exec URL
+# Slack's Interactivity Request URL used to point at directly. As of Phase 1
+# (see MIGRATION_RUNBOOK.md), this is ONLY used as a catch-all for
+# action_ids this Worker doesn't recognize yet, and as slack-service's own
+# manual rollback path — it should see zero live traffic in normal operation.
+APPS_SCRIPT_EXEC_URL = "https://script.google.com/macros/s/AKfycbxaDHRScoXLTU_D9nJRzTpObR9NsYWaleVZdY1eGzl7dSOiI8WsN04Hm679C8U6AEug/exec"
+
+# orchestrator-service's own /exec URL (a DIFFERENT Apps Script deployment
+# than slack-service above). As of Phase 1, this Worker calls THREE actions
+# on it directly: getMatterTasks (Log Comment's task dropdown),
+# getLedgerData (View Ledger), and handleSubmission (comment Submit).
+# Replace with your actual orchestrator-service deployment URL.
+ORCHESTRATOR_EXEC_URL = "https://script.google.com/macros/s/AKfycbxeJZd5hP9o4H58ZOZ_LYefA-wAVDdmjMt6xf_L7f3lcIN6geE_N_OZ_kWxgSAv0q2LTA/exec"
+
+# SLACK_BOT_TOKEN, SLACK_EXPECTED_TEAM_ID, and (NEW as of Phase 1)
+# INTERNAL_SERVICE_TOKEN are NOT set here — they're secrets, set via
+# `wrangler secret put`, so they never end up in this file or in version
+# control. See the setup steps below.
+#
+# NEW as of Phase 1: INTERNAL_SERVICE_TOKEN
+#   Previously only orchestrator-service and slack-service needed this
+#   (calls between the two of them). Now the Worker calls
+#   orchestrator-service's `handleSubmission` action directly for comment
+#   submissions, which is gated by the same internal-token check
+#   (`Shared_verifyInternalToken`) as slack-service's calls always were.
+#   MUST match the INTERNAL_SERVICE_TOKEN value already set in
+#   orchestrator-service's Script Properties — check there before setting
+#   this, don't generate a new value.
+#     wrangler secret put INTERNAL_SERVICE_TOKEN
