@@ -1,6 +1,7 @@
 module.exports = {
-  // Treat .js files as ESM (don't include .mjs here — .mjs is always ESM)
-  extensionsToTreatAsEsm: ['.js'],
+  // .js is auto-inferred as ESM when "type": "module" is in package.json
+  // So we don't need to include it here
+  extensionsToTreatAsEsm: [],
 
   // Find tests under test/ or __tests__ and any *.mjs test files
   testMatch: [
