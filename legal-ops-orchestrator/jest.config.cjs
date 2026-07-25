@@ -1,4 +1,7 @@
 module.exports = {
+  // Treat .js files as ESM (don't include .mjs here — .mjs is always ESM)
+  extensionsToTreatAsEsm: ['.js'],
+
   // Find tests under test/ or __tests__ and any *.mjs test files
   testMatch: [
     '**/test/**/*.mjs',
@@ -16,5 +19,8 @@ module.exports = {
   moduleFileExtensions: ['mjs', 'js', 'cjs', 'json'],
 
   // Helpful verbosity for CI logs
-  verbose: true
+  verbose: true,
+
+  // Keep node_modules ignored by default
+  transformIgnorePatterns: ['/node_modules/']
 };
