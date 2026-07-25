@@ -1,0 +1,13 @@
+name = "email-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+
+[vars]
+FORWARD_TO_EMAIL = "ganchoontatbackup1@gmail.com"
+
+# Set these with `wrangler secret put <NAME>` — never commit real values here:
+#   INTERNAL_SERVICE_TOKEN   (must match EMAIL_CONFIG.INTERNAL_SERVICE_TOKEN
+#                             / database-service's equivalent script property)
+#   DATABASE_SERVICE_URL     (database-service's deployed doPost web app URL)
+#   SLACK_WEBHOOK_URL        (optional)
+#   DISCORD_WEBHOOK_URL      (optional)
