@@ -1,7 +1,4 @@
 module.exports = {
-  // Treat .mjs files as ESM modules
-  extensionsToTreatAsEsm: ['.mjs'],
-
   // Find tests under test/ or __tests__ and any *.mjs test files
   testMatch: [
     '**/test/**/*.mjs',
@@ -16,7 +13,7 @@ module.exports = {
   testEnvironment: 'node',
 
   // Recognize these module extensions
-  moduleFileExtensions: ['js', 'mjs', 'cjs', 'json'],
+  moduleFileExtensions: ['mjs', 'js', 'cjs', 'json'],
 
   // Helpful verbosity for CI logs
   verbose: true
