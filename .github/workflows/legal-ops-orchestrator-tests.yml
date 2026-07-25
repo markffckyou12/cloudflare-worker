@@ -1,12 +1,30 @@
-  - name: Use Node.js
-    uses: actions/setup-node@v4
-    with:
-      node-version: 18
+name: Node.js CI — legal-ops-orchestrator
 
-  - name: Install dependencies (legal-ops-orchestrator)
-    working-directory: legal-ops-orchestrator
-    run: npm install --prefer-offline --no-audit --no-fund
+on:
+  push:
+    paths:
+      - 'legal-ops-orchestrator/**'
+  pull_request:
+    paths:
+      - 'legal-ops-orchestrator/**'
+  workflow_dispatch:
 
-  - name: Run tests
-    working-directory: legal-ops-orchestrator
-    run: npm test
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies (legal-ops-orchestrator)
+        working-directory: legal-ops-orchestrator
+        run: npm install --prefer-offline --no-audit --no-fund
+
+      - name: Run tests
+        working-directory: legal-ops-orchestrator
+        run: npm test
