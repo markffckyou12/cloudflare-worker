@@ -28,6 +28,10 @@ ORCHESTRATOR_EXEC_URL = "https://legal-ops-orchestrator.ganchoontat.workers.dev"
 #   orchestrator-service's `handleSubmission` action directly for comment
 #   submissions, which is gated by the same internal-token check
 #   (`Shared_verifyInternalToken`) as slack-service's calls always were.
+
+[[services]]
+binding = "ORCHESTRATOR"
+service = "legal-ops-orchestrator"
 #   MUST match the INTERNAL_SERVICE_TOKEN value already set in
 #   orchestrator-service's Script Properties — check there before setting
 #   this, don't generate a new value.
