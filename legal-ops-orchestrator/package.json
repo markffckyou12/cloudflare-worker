@@ -2,6 +2,7 @@
   "name": "legal-ops-orchestrator",
   "version": "0.0.1",
   "private": true,
+  "type": "module",
   "scripts": {
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand"
   },
