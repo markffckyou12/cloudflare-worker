@@ -15,7 +15,7 @@ APPS_SCRIPT_EXEC_URL = "https://script.google.com/macros/s/AKfycbxaDHRScoXLTU_D9
 # on it directly: getMatterTasks (Log Comment's task dropdown),
 # getLedgerData (View Ledger), and handleSubmission (comment Submit).
 # Replace with your actual orchestrator-service deployment URL.
-ORCHESTRATOR_EXEC_URL = "https://script.google.com/macros/s/AKfycbxeJZd5hP9o4H58ZOZ_LYefA-wAVDdmjMt6xf_L7f3lcIN6geE_N_OZ_kWxgSAv0q2LTA/exec"
+ORCHESTRATOR_EXEC_URL = "legal-ops-orchestrator.ganchoontat.workers.dev"
 
 # SLACK_BOT_TOKEN, SLACK_EXPECTED_TEAM_ID, and (NEW as of Phase 1)
 # INTERNAL_SERVICE_TOKEN are NOT set here — they're secrets, set via
