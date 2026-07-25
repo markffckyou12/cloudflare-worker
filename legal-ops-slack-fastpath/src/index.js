@@ -123,6 +123,32 @@ function parseSlackBody(rawBody, contentType) {
   return JSON.parse(rawBody);
 }
 
+// =========================================================================
+// callOrchestrator — routes to legal-ops-orchestrator via a Service Binding
+// (env.ORCHESTRATOR) when one is configured in wrangler.toml, since a plain
+// fetch() from one Worker to another Worker's *.workers.dev subdomain is
+// blocked by Cloudflare (error 1042 — loop/abuse prevention on the public
+// internet path). A Service Binding routes directly between the two
+// Workers on Cloudflare's internal network instead, so it never hits that
+// restriction — and it's faster than a real HTTP round-trip besides.
+//
+// The hostname in the URL passed to a bound Fetcher is never actually used
+// for routing (the binding itself determines the destination Worker) — it
+// just needs to be a syntactically valid absolute URL so the target
+// Worker's own `new URL(request.url)` parsing doesn't throw. Falls back to
+// a plain fetch() against ORCHESTRATOR_EXEC_URL if no binding is present
+// (e.g. local dev without service bindings configured, or before the
+// binding is added) — see wrangler.toml.
+function callOrchestrator(env, pathAndQuery, options) {
+  if (env.ORCHESTRATOR) {
+    return env.ORCHESTRATOR.fetch(`https://orchestrator.internal${pathAndQuery}`, options);
+  }
+  if (!env.ORCHESTRATOR_EXEC_URL) {
+    return Promise.reject(new Error('Neither ORCHESTRATOR service binding nor ORCHESTRATOR_EXEC_URL is configured.'));
+  }
+  return fetch(`${env.ORCHESTRATOR_EXEC_URL}${pathAndQuery}`, options);
+}
+
 function slackApiCall(env, method, body) {
   return fetch(`https://slack.com/api/${method}`, {
     method: 'POST',
@@ -247,11 +273,11 @@ async function fillInCommentForm(env, viewId, refNo, channelId, messageTs, paylo
   // gets filled in as a general/matter-level comment box rather than
   // leaving the user stuck on a permanent "Loading tasks…" screen.
   let tasks = [];
-  if (!env.ORCHESTRATOR_EXEC_URL) {
-    console.log('[Worker] ORCHESTRATOR_EXEC_URL not configured — opening comment form without a task list.');
+  if (!env.ORCHESTRATOR && !env.ORCHESTRATOR_EXEC_URL) {
+    console.log('[Worker] Neither ORCHESTRATOR service binding nor ORCHESTRATOR_EXEC_URL configured — opening comment form without a task list.');
   } else {
     try {
-      const resp = await fetch(`${env.ORCHESTRATOR_EXEC_URL}?action=getMatterTasks&refNo=${encodeURIComponent(refNo)}`);
+      const resp = await callOrchestrator(env, `?action=getMatterTasks&refNo=${encodeURIComponent(refNo)}`);
       const parsed = await resp.json();
       if (parsed.success) {
         tasks = parsed.data || [];
@@ -443,15 +469,15 @@ async function handleViewLedgerFastPath(payload, action, env, ctx) {
 }
 
 async function fillInLedgerForm(env, viewId, refNo, payload) {
-  if (!env.ORCHESTRATOR_EXEC_URL) {
-    console.log(`[Worker] ORCHESTRATOR_EXEC_URL not configured — cannot load ledger for ${refNo}.`);
-    await updateLedgerWithError(env, viewId, refNo, payload, 'ORCHESTRATOR_EXEC_URL is not configured on the Worker.');
+  if (!env.ORCHESTRATOR && !env.ORCHESTRATOR_EXEC_URL) {
+    console.log(`[Worker] Neither ORCHESTRATOR service binding nor ORCHESTRATOR_EXEC_URL configured — cannot load ledger for ${refNo}.`);
+    await updateLedgerWithError(env, viewId, refNo, payload, 'Orchestrator is not configured on the Worker.');
     return;
   }
 
   let parsed;
   try {
-    const resp = await fetch(`${env.ORCHESTRATOR_EXEC_URL}?action=getLedgerData&refNo=${encodeURIComponent(refNo)}`);
+    const resp = await callOrchestrator(env, `?action=getLedgerData&refNo=${encodeURIComponent(refNo)}`);
     parsed = await resp.json();
   } catch (err) {
     console.log(`[Worker] getLedgerData threw for ${refNo}: ${err}`);
@@ -544,9 +570,9 @@ async function forwardSubmissionToOrchestrator(payload, env) {
   const originChannelId = metadataParts[1] || null;
   const submitterUserId = payload.user ? payload.user.id : null;
 
-  if (!env.ORCHESTRATOR_EXEC_URL) {
-    console.log('[Worker] ORCHESTRATOR_EXEC_URL not configured — comment was never sent anywhere.');
-    await postEphemeral(env, originChannelId, submitterUserId, '⚠️ Your comment was NOT saved — ORCHESTRATOR_EXEC_URL is not configured on the Worker.');
+  if (!env.ORCHESTRATOR && !env.ORCHESTRATOR_EXEC_URL) {
+    console.log('[Worker] Neither ORCHESTRATOR service binding nor ORCHESTRATOR_EXEC_URL configured — comment was never sent anywhere.');
+    await postEphemeral(env, originChannelId, submitterUserId, '⚠️ Your comment was NOT saved — the Orchestrator is not configured on the Worker.');
     return;
   }
 
@@ -557,7 +583,7 @@ async function forwardSubmissionToOrchestrator(payload, env) {
   }
 
   try {
-    const resp = await fetch(env.ORCHESTRATOR_EXEC_URL, {
+    const resp = await callOrchestrator(env, '', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
