@@ -1,0 +1,22 @@
+name = "legal-ops-orchestrator"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Non-secret: the deployed /exec URLs of the two Apps Script services this
+# Worker still calls into (database-service and slack-service are staying
+# on Apps Script for now — only orchestrator-service is moving in Phase 2).
+[vars]
+DATABASE_SERVICE_EXEC_URL = "https://script.google.com/macros/s/AKfycbxEliLvB5PpdUtX_G-NJurhHImeQzbg0hopqJMwkVABKhP9TXfQarHsQceYfD_N_SxmXQ/exec"
+SLACK_SERVICE_EXEC_URL = "https://script.google.com/macros/s/AKfycbxaDHRScoXLTU_D9nJRzTpObR9NsYWaleVZdY1eGzl7dSOiI8WsN04Hm679C8U6AEug/exec"
+
+# Secret — DO NOT put the real value here. Before deploying, pull the
+# EXISTING value from orchestrator-service's Script Properties (Project
+# Settings -> Script Properties in the Apps Script editor) — do NOT
+# generate a new one, since database-service and slack-service already
+# expect this exact value and are not being touched in this phase.
+#
+#   wrangler secret put INTERNAL_SERVICE_TOKEN
+#
+# (same secret legal-ops-slack-fastpath already uses since Phase 1 — it's
+# one shared token across every internal service-to-service call in this
+# system, per orchestrator-service/config.js's original comment.)
