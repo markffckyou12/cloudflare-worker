@@ -20,3 +20,8 @@ SLACK_SERVICE_EXEC_URL = "https://script.google.com/macros/s/AKfycbxaDHRScoXLTU_
 # (same secret legal-ops-slack-fastpath already uses since Phase 1 — it's
 # one shared token across every internal service-to-service call in this
 # system, per orchestrator-service/config.js's original comment.)
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
