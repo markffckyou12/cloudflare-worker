@@ -1,21 +1,13 @@
 // =========================================================================
-// ORCHESTRATION HANDLERS — ported from orchestrator-service's api.js
-//
-// Business logic is UNCHANGED from the Apps Script original. The only
-// difference is that DatabaseClient_* / SlackClient_* calls are now async
-// (fetch-based) instead of synchronous (UrlFetchApp-based), so every call
-// site gets an `await`. Nothing about the decision-making changed.
+// ORCHESTRATION HANDLERS — ported from orchestrator-service's api.js,
+// plus NEW handleWriteLead (Phase 3 — Supabase-backed, replaces
+// database-service's _api_handleWriteLead as the actual write target for
+// email-gateway, which was calling a nonexistent action against the old
+// database-service entirely before this fix).
 // =========================================================================
 
 import { jsonResponse } from './shared-http.js';
 
-/**
- * Provisions the Slack workflow for a matter: reads its context from
- * database-service, creates (or resolves) a Slack channel via
- * slack-service, and writes the resulting channel ID back to
- * database-service. Triggered by database-service's
- * Database_ExecuteDelayedSlack after a matter's STATUS flips to "Active".
- */
 export async function handleProvisionSlackWorkflow(payload, db, slack, env) {
   if (!payload.refNo) {
     return jsonResponse({ success: false, message: 'Missing required field: refNo.' });
@@ -31,10 +23,6 @@ export async function handleProvisionSlackWorkflow(payload, db, slack, env) {
   const context = contextResult.data;
 
   const channelName = `${payload.refNo}-${context.clientName || ''}`;
-  // Same bug-fix preserved from the Apps Script original: channelName is
-  // the human-readable "refNo-clientName" Slack slug, NOT a safe value to
-  // bake into button values/private_metadata downstream. payload.refNo
-  // (the true, clean REF_NO) is threaded through separately below.
   const createResult = await slack.createChannel(
     channelName,
     true,
@@ -75,11 +63,6 @@ export async function handleProvisionSlackWorkflow(payload, db, slack, env) {
   });
 }
 
-/**
- * Edits a matter's already-posted Slack card in place. Unlike
- * provisionSlackWorkflow, this expects the caller (database-service, via
- * slacksync.js) to have already computed everything — no re-fetch needed.
- */
 export async function handleRefreshMatterCard(payload, db, slack, env) {
   if (!payload.refNo || !payload.channelId || !payload.messageTs) {
     return jsonResponse({ success: false, message: 'Missing required fields: refNo, channelId, messageTs.' });
@@ -102,17 +85,6 @@ export async function handleRefreshMatterCard(payload, db, slack, env) {
   return jsonResponse({ success: !!result.success, message: result.message });
 }
 
-/**
- * Handles a Slack comment-modal submission: extracts the refNo from
- * private_metadata and the comment text from the modal's state, then
- * writes it to database-service's MasterComments table.
- *
- * NOTE: this is now called directly by legal-ops-slack-fastpath (Phase 1),
- * which already parsed the raw Slack view_submission itself and sends it
- * here as `payload.payload` — same shape this function always expected
- * from the old two-hop Worker -> slack-service -> orchestrator-service
- * path, so no changes were needed on this end for Phase 1 to work.
- */
 export async function handleSlackSubmission(payload, db) {
   const rawData = payload.payload;
   if (!rawData || !rawData.view) {
@@ -136,8 +108,6 @@ export async function handleSlackSubmission(payload, db) {
     return jsonResponse({ success: false, message: 'Comment text was empty.' });
   }
 
-  // task_block is optional — absence (general comment / no tasks yet)
-  // falls through to '', same as the Apps Script original.
   let globalTaskId = '';
   try {
     const taskState = rawData.view.state.values.task_block;
@@ -152,4 +122,45 @@ export async function handleSlackSubmission(payload, db) {
   const writeResult = await db.writeComment(refNo, author, commentText, globalTaskId);
 
   return jsonResponse({ success: !!writeResult.success, message: writeResult.message });
+}
+
+/**
+ * NEW (Phase 3). Writes a response_leads row via Supabase. Currently the
+ * only caller is email-gateway (Linktree form-answer emails), fixed to call
+ * this instead of database-service's nonexistent recordLeadFromEmail.
+ * Field names match database-service's old writeLead contract deliberately
+ * (name/email/phone/notes/deliveryMethod/gmailMessageId) so no other caller
+ * needs to change if/when one gets added.
+ *
+ * project_type_id is deliberately never set here -- there's no reliable way
+ * to know a project type from a generic contact-form submission, and it's
+ * meant to stay null (per the schema's "null = do not promote" rule) until
+ * a human triages it, or a future AI-assisted suggestion gets written to
+ * ai_suggested_project_type_id for a human to review.
+ */
+export async function handleWriteLead(payload, supabase, env) {
+  if (!payload.name || !payload.email) {
+    return jsonResponse({ success: false, message: 'Missing required fields: name, email.' });
+  }
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    return jsonResponse({ success: false, message: 'SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured.' });
+  }
+
+  const result = await supabase.insertLead({
+    lead_name: payload.name,
+    lead_email: payload.email,
+    lead_phone: payload.phone || null,
+    inquiry_notes: payload.notes || null,
+    delivery_method: payload.deliveryMethod || null,
+    gmail_message_id: payload.gmailMessageId || null
+  });
+
+  if (result.duplicate) {
+    return jsonResponse({ success: true, message: 'Lead already ingested (duplicate message ID); no-op.', duplicate: true });
+  }
+  if (!result.success) {
+    return jsonResponse({ success: false, message: result.message });
+  }
+
+  return jsonResponse({ success: true, message: 'Lead written successfully.' });
 }
