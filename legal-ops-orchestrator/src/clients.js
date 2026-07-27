@@ -1,18 +1,6 @@
 // =========================================================================
-// SERVICE CLIENTS — ported from orchestrator-service's client.js
-//
-// Mechanical port per the runbook: UrlFetchApp.fetch(url, {method, payload:
-// JSON.stringify(x)}) becomes fetch(url, {method, body: JSON.stringify(x),
-// headers: {'Content-Type': 'application/json'}}). Simple bearer-token
-// auth, not request signing, so there's no restricted-header issue (unlike
-// the OCI signing work referenced in SYSTEM_HANDOFF.md) — a direct port.
-//
-// Function names and argument order are kept IDENTICAL to the Apps Script
-// originals so api.js's call sites don't need to change semantically.
-//
-// GETs remain unauthenticated (matching database-service's own doGet
-// convention — reads are open, writes require the internal token) — same
-// as the original.
+// SERVICE CLIENTS — ported from orchestrator-service/client.js
+// (see original header comment for the UrlFetchApp -> fetch() porting note)
 // =========================================================================
 
 async function callService(url, method, payload) {
@@ -21,17 +9,13 @@ async function callService(url, method, payload) {
     options.headers = { 'Content-Type': 'application/json' };
     options.body = JSON.stringify(payload);
   }
-
-  // No muteHttpExceptions equivalent needed: unlike UrlFetchApp, fetch()
-  // does not throw on non-2xx responses by default — it only throws on
-  // actual network failure. Callers here already treat "check
-  // result.success in the parsed body" as the source of truth, which
-  // fetch's behavior matches without any extra flag.
   const response = await fetch(url, options);
   return response.json();
 }
 
-// --- Database service ---
+// --- Database service (Apps Script / Sheets — being phased out per
+// MIGRATION_RUNBOOK.md Phase 3, still the live path for every action below
+// except writeLead) ---
 
 export function makeDatabaseClient(env) {
   const base = env.DATABASE_SERVICE_EXEC_URL;
@@ -83,8 +67,6 @@ export function makeSlackClient(env) {
         isPrivate: !!isPrivate,
         additionalUserIds: additionalUserIds || [],
         unresolvedOfficerLabels: unresolvedOfficerLabels || [],
-        // Same bug-fix preserved from the original: the true, clean
-        // refNo, distinct from channelName ("refNo-clientName").
         refNo: refNo || channelName
       });
     },
@@ -108,6 +90,48 @@ export function makeSlackClient(env) {
         officersStackedString,
         statusEnum
       });
+    }
+  };
+}
+
+// --- Supabase (NEW — Phase 3. Plain PostgREST fetch calls rather than the
+// @supabase/supabase-js SDK, to match this file's existing hand-rolled
+// callService() pattern instead of adding an SDK dependency for one table's
+// worth of writes so far. Revisit if/when more Supabase-backed actions get
+// added here — at that point the SDK may earn its weight. ---
+
+export function makeSupabaseClient(env) {
+  const base = `${env.SUPABASE_URL}/rest/v1`;
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`
+  };
+
+  return {
+    /**
+     * Inserts a response_leads row. gmail_message_id has a UNIQUE
+     * constraint in the schema (same idempotency intent as the original
+     * db_isDuplicateLeadByGmailMessageId check-before-insert) -- rather than
+     * a separate lookup-then-insert round trip, this relies on the
+     * constraint itself and treats a resulting 23505 (unique_violation) as
+     * a successful no-op, same outcome as the original's explicit check.
+     */
+    async insertLead(lead) {
+      const resp = await fetch(`${base}/response_leads`, {
+        method: 'POST',
+        headers: { ...authHeaders, Prefer: 'return=representation' },
+        body: JSON.stringify(lead)
+      });
+      const body = await resp.json().catch(() => null);
+
+      if (!resp.ok) {
+        if (resp.status === 409 && body && body.code === '23505') {
+          return { success: true, duplicate: true };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${resp.status}` };
+      }
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
     }
   };
 }
