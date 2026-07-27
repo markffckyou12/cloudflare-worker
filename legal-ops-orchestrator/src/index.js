@@ -1,46 +1,36 @@
 // =========================================================================
 // legal-ops-orchestrator — Cloudflare Worker
+// (see original header comment in the repo for Phase 2 background)
 //
-// Phase 2 of MIGRATION_RUNBOOK.md: replaces orchestrator-service (Apps
-// Script) as the thing legal-ops-slack-fastpath (Phase 1's Worker) and
-// database-service call for orchestration actions. Routing logic below is
-// a direct translation of orchestrator-service/api.js's doGet/doPost
-// action switches — same action names, same required fields, same
-// response shapes — just `request.method` + parsed `action` from query
-// params (GET) or JSON body (POST) instead of Apps Script's `e.parameter`
-// / `e.postData.contents`.
-//
-// Deliberately a SEPARATE Worker from legal-ops-slack-fastpath (see
-// runbook's "Architecture decision" in Phase 2) — a bug in Slack-ingress
-// handling shouldn't be able to take down the orchestration layer that
-// database-service's scheduled jobs / onEdit triggers also depend on.
+// UPDATED (Phase 3): added 'writeLead' action, backed by Supabase instead
+// of database-service — see clients.js's makeSupabaseClient and
+// handlers.js's handleWriteLead. Everything else is unchanged.
 // =========================================================================
 
 import { jsonResponse, verifyInternalToken } from './shared-http.js';
-import { makeDatabaseClient, makeSlackClient } from './clients.js';
+import { makeDatabaseClient, makeSlackClient, makeSupabaseClient } from './clients.js';
 import {
   handleProvisionSlackWorkflow,
   handleRefreshMatterCard,
-  handleSlackSubmission
+  handleSlackSubmission,
+  handleWriteLead
 } from './handlers.js';
 
 export default {
   async fetch(request, env, ctx) {
     const db = makeDatabaseClient(env);
     const slack = makeSlackClient(env);
+    const supabase = makeSupabaseClient(env);
 
     try {
       if (request.method === 'GET') {
         return await routeGet(request, db, env);
       }
       if (request.method === 'POST') {
-        return await routePost(request, db, slack, env);
+        return await routePost(request, db, slack, supabase, env);
       }
       return jsonResponse({ success: false, message: `Unsupported method: ${request.method}` });
     } catch (err) {
-      // Same fail-safe shape as orchestrator-service's doGet/doPost
-      // catch-alls — never let an unhandled exception surface a raw
-      // stack trace to a caller.
       console.error(`[Orchestrator Error]: ${err && err.stack ? err.stack : err}`);
       return jsonResponse({ success: false, message: 'Internal routing exception.' });
     }
@@ -51,9 +41,6 @@ async function routeGet(request, db, env) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
 
-  // Proxies Slack's "View Ledger" button data — unauthenticated GET,
-  // matching database-service's own equivalent reads (reads are open,
-  // writes require the internal token — consistent across every service).
   if (action === 'getLedgerData') {
     const refNo = url.searchParams.get('refNo');
     if (!refNo) return jsonResponse({ success: false, message: 'Missing required parameter: refNo' });
@@ -64,7 +51,6 @@ async function routeGet(request, db, env) {
     return jsonResponse(result);
   }
 
-  // Backs the comment modal's task dropdown — same proxy shape as above.
   if (action === 'getMatterTasks') {
     const refNo = url.searchParams.get('refNo');
     if (!refNo) return jsonResponse({ success: false, message: 'Missing required parameter: refNo' });
@@ -78,7 +64,7 @@ async function routeGet(request, db, env) {
   return jsonResponse({ success: false, message: `Unknown or missing GET action: "${action}"` });
 }
 
-async function routePost(request, db, slack, env) {
+async function routePost(request, db, slack, supabase, env) {
   let payload;
   try {
     payload = await request.json();
@@ -89,8 +75,8 @@ async function routePost(request, db, slack, env) {
   const action = payload.action;
 
   // Every POST action here has real side effects — all require internal
-  // auth, no "safe to leave open" action on this router. Same fail-closed
-  // behavior as Shared_verifyInternalToken.
+  // auth. 'writeLead' included: it's a new external-facing write path
+  // (email-gateway), same trust boundary as every other write action here.
   if (!verifyInternalToken(payload, env.INTERNAL_SERVICE_TOKEN)) {
     return jsonResponse({ success: false, message: 'Unauthorized: missing or invalid authToken.' });
   }
@@ -111,12 +97,13 @@ async function routePost(request, db, slack, env) {
     return jsonResponse(pinResult);
   }
 
-  // Action name matches what legal-ops-slack-fastpath already sends
-  // ("handleSubmission", not "handleSlackSubmission") — kept as-is, same
-  // reasoning the original orchestrator-service/api.js documented: no
-  // reason to force another caller-side edit for a naming preference.
   if (action === 'handleSubmission') {
     return handleSlackSubmission(payload, db);
+  }
+
+  // NEW (Phase 3)
+  if (action === 'writeLead') {
+    return handleWriteLead(payload, supabase, env);
   }
 
   return jsonResponse({ success: false, message: `Unknown or missing POST action: "${action}"` });
