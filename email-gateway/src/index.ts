@@ -1,24 +1,43 @@
 // =========================================================================
 // INBOUND EMAIL GATEWAY (Cloudflare Email Worker - TypeScript Edition)
 // =========================================================================
+// FIXED (2026-07-27): this was calling database-service with
+// action:'recordLeadFromEmail', which database-service's router never
+// implemented (only 'writeLead' exists) -- and even that would have failed,
+// since it sends {source, refNo, fromSender, subject, receivedAt}, none of
+// which match writeLead's required {name, email}. On top of that, the
+// refRegex gate never matched a real Linktree "New form answer" email at
+// all -- there's no "Ref" field in that format -- so _handleLeadEmail was
+// returning at `if (!refMatch) return` before the broken fetch() call was
+// even reached. Confirmed against a real sample email (6 real submissions,
+// all matching the Email/Name/Phone number/Message label format below, none
+// containing anything matching a "Ref" pattern).
+//
+// Fix: parse the actual labeled fields Linktree sends, and call
+// legal-ops-orchestrator's action-dispatch endpoint (not database-service
+// directly) with a real 'writeLead' action -- matching the field names
+// database-service's _api_handleWriteLead already expects, since
+// legal-ops-orchestrator's new writeLead handler writes to the same
+// response_leads shape.
+// =========================================================================
 
 import PostalMime from 'postal-mime';
 
-// 1. Define the type environment interface for Wrangler secrets & variables
 export interface Env {
   FORWARD_TO_EMAIL: string;
   INTERNAL_SERVICE_TOKEN: string;
-  DATABASE_SERVICE_URL: string;
+  // RENAMED from DATABASE_SERVICE_URL: this now points at
+  // legal-ops-orchestrator's Worker URL, not database-service's Apps Script
+  // /exec URL -- update the deployed secret/var accordingly.
+  ORCHESTRATOR_URL: string;
   SLACK_WEBHOOK_URL?: string;
   DISCORD_WEBHOOK_URL?: string;
 }
 
-// 2. Define internal structural interfaces for our routing architecture
 interface LeadSource {
   name: string;
   matchesSender: (fromAddress: string) => boolean;
   matchesSubject: (subject: string) => boolean;
-  refRegex: RegExp;
   actions: string[];
   forwardToInbox: boolean;
 }
@@ -30,19 +49,16 @@ interface MatchedRoute {
   forwardToInbox: boolean;
 }
 
-// 3. Define the lead routing profiles
 const LEAD_SOURCES: LeadSource[] = [
   {
     name: 'linktree',
     matchesSender: (fromAddress: string) => fromAddress.includes('subscribers.linktr.ee'),
     matchesSubject: (subject: string) => /new form answer/i.test(subject),
-    refRegex: /Ref(?:erence)?\s*(?:No\.?|ID)?[:\s]+([A-Za-z0-9-]+)/i,
     actions: ['database'],
     forwardToInbox: true
   }
 ];
 
-// 4. Main Exported Worker handlers
 export default {
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
     let email;
@@ -56,7 +72,6 @@ export default {
 
     const route = _matchRoute(message, email);
 
-    // Side effects never block the forward pipeline
     ctx.waitUntil(_runRouteActions(route, message, email, env));
 
     if (route.forwardToInbox) {
@@ -65,18 +80,17 @@ export default {
   }
 };
 
-// 5. Utility Helper Routing Functions
 function _matchRoute(message: ForwardableEmailMessage, email: any): MatchedRoute {
   const fromAddress = (message.from || '').toLowerCase();
   const subject = email.subject || '';
 
   const source = LEAD_SOURCES.find(s => s.matchesSender(fromAddress) && s.matchesSubject(subject));
   if (source) {
-    return { 
-      type: `lead:${source.name}`, 
-      source, 
-      actions: source.actions, 
-      forwardToInbox: source.forwardToInbox 
+    return {
+      type: `lead:${source.name}`,
+      source,
+      actions: source.actions,
+      forwardToInbox: source.forwardToInbox
     };
   }
 
@@ -84,9 +98,9 @@ function _matchRoute(message: ForwardableEmailMessage, email: any): MatchedRoute
 }
 
 async function _runRouteActions(
-  route: MatchedRoute, 
-  message: ForwardableEmailMessage, 
-  email: any, 
+  route: MatchedRoute,
+  message: ForwardableEmailMessage,
+  email: any,
   env: Env
 ): Promise<void> {
   for (const action of route.actions) {
@@ -100,45 +114,79 @@ async function _runRouteActions(
   }
 }
 
+/**
+ * Parses Linktree's "New form answer" body format:
+ *   Email\n<value>\n\nName\n<value>\n\nPhone number\n<value>\n\nMessage\n<value>
+ * Verified against 6 real sample submissions from the actual inbound email
+ * (all matched correctly, including a name/message as short as "Hi"/"Test").
+ */
+function _parseLinktreeFields(bodyText: string): { email: string | null; name: string | null; phone: string | null; message: string | null } {
+  const get = (label: string): string | null => {
+    const re = new RegExp(`${label}\\s*\\n+([^\\n]+)`, 'i');
+    const m = bodyText.match(re);
+    return m ? m[1].trim() : null;
+  };
+  return {
+    email: get('Email'),
+    name: get('Name'),
+    phone: get('Phone number'),
+    message: get('Message'),
+  };
+}
+
 async function _handleLeadEmail(
-  route: MatchedRoute, 
-  message: ForwardableEmailMessage, 
-  email: any, 
+  route: MatchedRoute,
+  message: ForwardableEmailMessage,
+  email: any,
   env: Env
 ): Promise<void> {
   if (!route.source) return;
 
   const bodyText: string = email.text || email.html || '';
-  const refMatch = bodyText.match(route.source.refRegex);
+  const fields = _parseLinktreeFields(bodyText);
 
-  if (!refMatch) {
-    console.warn(`${route.source.name} lead email matched but no reference ID found in body.`);
+  // Mirrors legal-ops-orchestrator's writeLead handler's own requirement
+  // (name + email required) -- check here too so a malformed/unexpected
+  // Linktree template change fails loudly in logs rather than silently
+  // sending a request that'll just get rejected downstream anyway.
+  if (!fields.name || !fields.email) {
+    console.warn(`${route.source.name} lead email matched but could not parse name/email from body. Parsed:`, fields);
     return;
   }
 
-  const resp = await fetch(env.DATABASE_SERVICE_URL, {
+  const resp = await fetch(env.ORCHESTRATOR_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      action: 'recordLeadFromEmail',
+      action: 'writeLead',
       authToken: env.INTERNAL_SERVICE_TOKEN,
-      source: route.source.name,
-      refNo: refMatch[1],
-      fromSender: message.from,
-      subject: email.subject,
-      receivedAt: new Date().toISOString()
+      name: fields.name,
+      email: fields.email,
+      phone: fields.phone || '',
+      notes: fields.message || '',
+      deliveryMethod: `Linktree (${route.source.name})`,
+      // email.messageId is this email's Message-ID header (via PostalMime) --
+      // used the same way Gmail's message ID was: as an idempotency key so a
+      // re-delivered/duplicate inbound email doesn't create a second lead.
+      gmailMessageId: email.messageId || ''
     })
   });
 
   if (!resp.ok) {
-    console.error(`database-service returned HTTP ${resp.status} for ref ${refMatch[1]} (source: ${route.source.name})`);
+    console.error(`legal-ops-orchestrator returned HTTP ${resp.status} for lead ${fields.email} (source: ${route.source.name})`);
+    return;
+  }
+
+  const result = await resp.json().catch(() => null) as { success?: boolean } | null;
+  if (!result || !result.success) {
+    console.error(`legal-ops-orchestrator rejected writeLead for ${fields.email}:`, result);
   }
 }
 
 async function _notifySlack(
-  route: MatchedRoute, 
-  message: ForwardableEmailMessage, 
-  email: any, 
+  route: MatchedRoute,
+  message: ForwardableEmailMessage,
+  email: any,
   env: Env
 ): Promise<void> {
   if (!env.SLACK_WEBHOOK_URL) return;
@@ -150,8 +198,8 @@ async function _notifySlack(
 }
 
 async function _notifyDiscord(
-  route: MatchedRoute, 
-  message: ForwardableEmailMessage, 
+  route: MatchedRoute,
+  message: ForwardableEmailMessage,
   env: Env
 ): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
