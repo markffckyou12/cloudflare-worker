@@ -6,6 +6,9 @@
   "scripts": {
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand"
   },
+  "dependencies": {
+    "jose": "^6.2.4"
+  },
   "devDependencies": {
     "jest": "^29.7.0",
     "miniflare": "^3.0.0"
