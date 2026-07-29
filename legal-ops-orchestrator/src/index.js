@@ -18,14 +18,16 @@ import {
   handlePromoteLeads,
   handleDecodeRef,
   handleSendAck,
-  handleSendProgress
+  handleSendProgress,
+  handleListMatters,
+  handleListLeads
 } from './handlers.js';
 
 // Admin UI actions authenticate a human staff member via a Supabase Auth
 // JWT (Authorization header), NOT the shared INTERNAL_SERVICE_TOKEN --
 // that's a service-to-service secret and must never reach a browser.
 // Everything else on this router keeps using authToken as before.
-const ADMIN_ACTIONS = new Set(['deployBlueprints', 'promoteLeads', 'decodeRef', 'sendAck', 'sendProgress']);
+const ADMIN_ACTIONS = new Set(['deployBlueprints', 'promoteLeads', 'decodeRef', 'sendAck', 'sendProgress', 'listMatters', 'listLeads']);
 
 async function requireStaff(request, env, supabase) {
   const authHeader = request.headers.get('Authorization') || '';
@@ -52,6 +54,8 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'decodeRef') return handleDecodeRef(payload, supabase);
   if (action === 'sendAck') return handleSendAck(payload, supabase, staff);
   if (action === 'sendProgress') return handleSendProgress(payload, supabase, staff);
+  if (action === 'listMatters') return handleListMatters(payload, supabase);
+  if (action === 'listLeads') return handleListLeads(payload, supabase);
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
 }
 
