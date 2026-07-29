@@ -59,23 +59,46 @@ async function routeAdminAction(action, payload, supabase, staff) {
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
 }
 
+// --- CORS ---
+// Needed as of the admin UI (a real browser page on a different origin,
+// e.g. *.pages.dev, calling this Worker on *.workers.dev). Every prior
+// caller (curl, email-gateway, Slack) isn't a browser, so this was never
+// needed before -- CORS is a browser-only enforcement, which is why curl
+// testing writeLead worked fine while the browser-based admin UI silently
+// failed on listMatters/listLeads.
+function withCors(response, origin) {
+  const headers = new Headers(response.headers);
+  headers.set('Access-Control-Allow-Origin', origin || '*');
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  return new Response(response.body, { status: response.status, headers });
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const origin = request.headers.get('Origin') || '*';
+
+    if (request.method === 'OPTIONS') {
+      return withCors(new Response(null, { status: 204 }), origin);
+    }
+
     const db = makeDatabaseClient(env);
     const slack = makeSlackClient(env);
     const supabase = makeSupabaseClient(env);
 
     try {
+      let response;
       if (request.method === 'GET') {
-        return await routeGet(request, db, env);
+        response = await routeGet(request, db, env);
+      } else if (request.method === 'POST') {
+        response = await routePost(request, db, slack, supabase, env);
+      } else {
+        response = jsonResponse({ success: false, message: `Unsupported method: ${request.method}` });
       }
-      if (request.method === 'POST') {
-        return await routePost(request, db, slack, supabase, env);
-      }
-      return jsonResponse({ success: false, message: `Unsupported method: ${request.method}` });
+      return withCors(response, origin);
     } catch (err) {
       console.error(`[Orchestrator Error]: ${err && err.stack ? err.stack : err}`);
-      return jsonResponse({ success: false, message: 'Internal routing exception.' });
+      return withCors(jsonResponse({ success: false, message: 'Internal routing exception.' }), origin);
     }
   }
 };
