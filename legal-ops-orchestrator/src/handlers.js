@@ -181,6 +181,16 @@ async function deployBlueprintsForMatter(supabase, matterId, projectTypeId) {
   return { deployed: inserted.length };
 }
 
+export async function handleListMatters(payload, supabase) {
+  const matters = await supabase.listMatters();
+  return jsonResponse({ success: true, matters });
+}
+
+export async function handleListLeads(payload, supabase) {
+  const leads = await supabase.listLeads();
+  return jsonResponse({ success: true, leads });
+}
+
 export async function handleDeployBlueprints(payload, supabase, staff) {
   if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
 
