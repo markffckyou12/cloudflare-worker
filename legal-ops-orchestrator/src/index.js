@@ -38,6 +38,7 @@ async function requireStaff(request, env, supabase) {
   try {
     claims = await verifyStaffJwt(token, env);
   } catch (err) {
+    console.error(`Staff JWT verification failed: ${err && err.message ? err.message : err}`);
     return { error: jsonResponse({ success: false, message: 'Invalid or expired token.' }) };
   }
 
