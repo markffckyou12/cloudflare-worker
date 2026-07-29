@@ -156,6 +156,20 @@ export function makeSupabaseClient(env) {
       return body[0];
     },
 
+    /** Recent matters for the admin UI's browsable list (not just pending/actionable ones). */
+    async listMatters(limit = 50) {
+      const { ok, body } = await pgFetch(`/matters?select=id,ref_no,client_name,status,progress_pct,project_type_id&order=created_at.desc&limit=${limit}`);
+      if (!ok) throw new Error(`Failed to list matters: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
+    /** Recent leads for the admin UI's browsable list (all statuses, not just Pending). */
+    async listLeads(limit = 50) {
+      const { ok, body } = await pgFetch(`/response_leads?select=id,lead_name,lead_email,acknowledge_status,project_type_id,created_at&order=created_at.desc&limit=${limit}`);
+      if (!ok) throw new Error(`Failed to list leads: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
     async getConfigTaskTemplates(projectTypeId) {
       const { ok, body } = await pgFetch(`/config_task_templates?project_type_id=eq.${projectTypeId}&select=title,sequence,default_assigned_staff_id&order=sequence`);
       if (!ok) throw new Error(`Failed to read config_task_templates: ${JSON.stringify(body)}`);
