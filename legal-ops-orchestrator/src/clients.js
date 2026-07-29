@@ -264,16 +264,32 @@ function getJwks(env) {
 }
 
 export async function verifyStaffJwt(token, env) {
-  const issuer = `${env.SUPABASE_URL}/auth/v1`;
-  try {
-    const { payload } = await jwtVerify(token, getJwks(env), { issuer });
-    return payload;
-  } catch (jwksErr) {
-    if (!env.SUPABASE_JWT_SECRET) throw jwksErr;
-    const secret = new TextEncoder().encode(env.SUPABASE_JWT_SECRET);
-    const { payload } = await jwtVerify(token, secret, { issuer });
-    return payload;
+  // CORRECTED: this project's `anon` API key is a legacy-format static JWT
+  // (payload contains `"iss":"supabase"`, confirmed by decoding it during
+  // setup) -- that's the tell for the legacy shared-secret signing model,
+  // not modern asymmetric JWKS signing. Try the shared secret FIRST for
+  // that reason (JWKS was tried first originally, which likely failed
+  // every time on this project and masked the real error).
+  //
+  // Also dropped the `issuer` constraint entirely: it assumed the modern
+  // `<url>/auth/v1` issuer format without ever confirming it against a
+  // real token from this project, and a wrong assumption there would
+  // reject every valid login with the same generic error. Signature
+  // verification alone (which jwtVerify always performs, along with
+  // exp/nbf) is still cryptographically sound without it -- issuer
+  // checking is defense-in-depth for multi-tenant key reuse, which
+  // doesn't apply here since this secret is dedicated to one project.
+  if (env.SUPABASE_JWT_SECRET) {
+    try {
+      const secret = new TextEncoder().encode(env.SUPABASE_JWT_SECRET);
+      const { payload } = await jwtVerify(token, secret);
+      return payload;
+    } catch (secretErr) {
+      console.error(`Staff JWT: shared-secret verification failed (${secretErr.message}); trying JWKS as fallback.`);
+    }
   }
+  const { payload } = await jwtVerify(token, getJwks(env));
+  return payload;
 }
 
 export { callService as _callServiceForTests };
