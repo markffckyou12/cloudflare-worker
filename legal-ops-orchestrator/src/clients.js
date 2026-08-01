@@ -238,6 +238,64 @@ export function makeSupabaseClient(env) {
       await pgFetch('/system_health_logs', { method: 'POST', body: JSON.stringify(entry) });
     },
 
+    // --- Staff management (Phase 4) ---
+
+    /** Full roster for the admin UI, active and inactive alike (the UI needs both to offer reactivation). */
+    async listStaff() {
+      const { ok, body } = await pgFetch(
+        '/staff?select=id,name,initial,domain_email,linked_email,special_rules,position,slack_member_id,is_active,created_at&order=is_active.desc,name.asc'
+      );
+      if (!ok) throw new Error(`Failed to list staff: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
+    async getStaffByInitial(initial) {
+      const { ok, body } = await pgFetch(`/staff?initial=eq.${encodeURIComponent(initial)}&select=id,initial`);
+      if (!ok || !Array.isArray(body) || body.length === 0) return null;
+      return body[0];
+    },
+
+    /**
+     * Enrolls a new staff member. `initial` has a UNIQUE constraint in the
+     * schema (same idempotency shape as insertLead's gmail_message_id
+     * handling above) -- a 23505 conflict is surfaced as a clear message
+     * rather than a raw PostgREST error, since "initial already in use" is
+     * an expected, actionable case here, not an exceptional one.
+     */
+    async insertStaff(staffFields) {
+      const { ok, status, body } = await pgFetch('/staff', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(staffFields)
+      });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23505') {
+          return { success: false, message: `Initial "${staffFields.initial}" is already in use by another staff member.` };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
+    },
+
+    /** Edits an existing staff member's fields, and/or flips is_active (enroll/disenroll). */
+    async updateStaff(staffId, fields) {
+      const { ok, status, body } = await pgFetch(`/staff?id=eq.${staffId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23505') {
+          return { success: false, message: `Initial "${fields.initial}" is already in use by another staff member.` };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      if (!Array.isArray(body) || body.length === 0) {
+        return { success: false, message: `Staff id ${staffId} not found.` };
+      }
+      return { success: true, data: body[0] };
+    },
+
     async insertAuditLog({ staffId, action, tableName = null, recordId = null, detail = null }) {
       const { ok, body } = await pgFetch('/audit_log', {
         method: 'POST',
