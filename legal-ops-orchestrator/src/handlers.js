@@ -191,6 +191,110 @@ export async function handleListLeads(payload, supabase) {
   return jsonResponse({ success: true, leads });
 }
 
+// --- Staff management (Phase 4) ---
+
+export async function handleListStaff(payload, supabase) {
+  const roster = await supabase.listStaff();
+  return jsonResponse({ success: true, staff: roster });
+}
+
+/**
+ * Enrolls a new staff member. `initial` is required and must be unique
+ * (enforced at the DB level -- see clients.js's insertStaff); everything
+ * else mirrors the STAFF_SPREADSHEET columns from the pre-migration Sheet
+ * (domain_email/linked_email/special_rules/position/slack_member_id) so
+ * the admin UI's form can map 1:1 onto what staff used to be tracked with.
+ * New staff default to active=true unless the caller says otherwise.
+ */
+export async function handleAddStaff(payload, supabase, staff) {
+  if (!payload.name || !payload.initial) {
+    return jsonResponse({ success: false, message: 'Missing required fields: name, initial.' });
+  }
+
+  const result = await supabase.insertStaff({
+    name: payload.name,
+    initial: payload.initial,
+    domain_email: payload.domainEmail || null,
+    linked_email: payload.linkedEmail || null,
+    special_rules: payload.specialRules || null,
+    position: payload.position || null,
+    slack_member_id: payload.slackMemberId || null,
+    is_active: payload.isActive !== undefined ? !!payload.isActive : true
+  });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'add_staff', tableName: 'staff',
+    recordId: result.data.id, detail: { name: payload.name, initial: payload.initial }
+  });
+
+  return jsonResponse({ success: true, staff: result.data });
+}
+
+/**
+ * Edits an existing staff member's fields. Every field is optional --
+ * only what's present in the payload gets patched -- so this doubles as
+ * the "edit one field" and "edit everything" case without a separate
+ * action. Does NOT touch is_active; use setStaffStatus for that so
+ * enroll/disenroll stays an explicit, separately-audited action rather
+ * than a side effect of an unrelated edit.
+ */
+export async function handleUpdateStaff(payload, supabase, staff) {
+  if (!payload.staffId) return jsonResponse({ success: false, message: 'Missing required field: staffId.' });
+
+  const fields = {};
+  if (payload.name !== undefined) fields.name = payload.name;
+  if (payload.initial !== undefined) fields.initial = payload.initial;
+  if (payload.domainEmail !== undefined) fields.domain_email = payload.domainEmail;
+  if (payload.linkedEmail !== undefined) fields.linked_email = payload.linkedEmail;
+  if (payload.specialRules !== undefined) fields.special_rules = payload.specialRules;
+  if (payload.position !== undefined) fields.position = payload.position;
+  if (payload.slackMemberId !== undefined) fields.slack_member_id = payload.slackMemberId;
+
+  if (Object.keys(fields).length === 0) {
+    return jsonResponse({ success: false, message: 'No editable fields provided.' });
+  }
+
+  const result = await supabase.updateStaff(payload.staffId, fields);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'update_staff', tableName: 'staff',
+    recordId: payload.staffId, detail: fields
+  });
+
+  return jsonResponse({ success: true, staff: result.data });
+}
+
+/**
+ * Enroll / disenroll toggle. Kept separate from handleUpdateStaff so
+ * "someone deactivated a staff member" is always its own clearly-labeled
+ * audit_log row (action: 'activate_staff' / 'deactivate_staff'), not
+ * buried inside a generic 'update_staff' detail blob.
+ *
+ * Deliberately does NOT block deactivating a staff member who's the
+ * caller's own account or who has open matter_officers/master_tasks
+ * assignments -- is_active only gates staff JWT login (see requireStaff
+ * in index.js) and default_assigned_staff_id lookups going forward; it
+ * doesn't retroactively touch existing matter_officers rows or
+ * historical master_tasks.assigned_staff_id. Reassign their open work
+ * separately if that matters operationally.
+ */
+export async function handleSetStaffStatus(payload, supabase, staff) {
+  if (!payload.staffId) return jsonResponse({ success: false, message: 'Missing required field: staffId.' });
+  if (payload.isActive === undefined) return jsonResponse({ success: false, message: 'Missing required field: isActive.' });
+
+  const result = await supabase.updateStaff(payload.staffId, { is_active: !!payload.isActive });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: payload.isActive ? 'activate_staff' : 'deactivate_staff',
+    tableName: 'staff', recordId: payload.staffId
+  });
+
+  return jsonResponse({ success: true, staff: result.data });
+}
+
 export async function handleDeployBlueprints(payload, supabase, staff) {
   if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
 
