@@ -194,6 +194,45 @@ export function makeSupabaseClient(env) {
       return (body || []).filter(l => !String(l.acknowledge_status).startsWith('Skipped'));
     },
 
+    // --- Project config (Phase 5) ---
+
+    async listProjectTypes() {
+      const { ok, body } = await pgFetch('/project_types?select=id,name,prefix_digit&order=prefix_digit.asc');
+      if (!ok) throw new Error(`Failed to list project types: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
+    /** name and prefix_digit are both UNIQUE at the DB level. */
+    async insertProjectType(fields) {
+      const { ok, status, body } = await pgFetch('/project_types', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23505') {
+          return { success: false, message: `A project type with that name or prefix digit already exists.` };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
+    },
+
+    /**
+     * Read-only peek at the current seq for (prefix_digit, year) --
+     * does NOT increment it (unlike incrementRefSeq below, which is the
+     * only thing that should ever actually consume a sequence number).
+     * Returns 0 if no row exists yet for that (prefix_digit, year) pair,
+     * matching increment_ref_seq's own "insert seq=1 on first call"
+     * starting point.
+     */
+    async peekRefSeq(prefixDigit, year) {
+      const { ok, body } = await pgFetch(`/ref_no_counters?prefix_digit=eq.${prefixDigit}&year=eq.${year}&select=seq`);
+      if (!ok) throw new Error(`Failed to read ref_no_counters: ${JSON.stringify(body)}`);
+      if (!Array.isArray(body) || body.length === 0) return 0;
+      return body[0].seq;
+    },
+
     async getProjectType(projectTypeId) {
       const { ok, body } = await pgFetch(`/project_types?id=eq.${projectTypeId}&select=id,name,prefix_digit`);
       if (!ok || !Array.isArray(body) || body.length === 0) return null;
