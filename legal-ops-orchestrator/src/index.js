@@ -25,8 +25,11 @@ import {
   handleAddStaff,
   handleUpdateStaff,
   handleSetStaffStatus,
+  handleDeleteStaff,
   handleListProjectTypes,
   handleAddProjectType,
+  handleUpdateProjectType,
+  handleDeleteProjectType,
   handlePreviewRefNo,
   handleCreateMatter
 } from './handlers.js';
@@ -38,9 +41,9 @@ import {
 const ADMIN_ACTIONS = new Set([
   'deployBlueprints', 'promoteLeads', 'decodeRef', 'sendAck', 'sendProgress', 'listMatters', 'listLeads',
   // Phase 4: staff management
-  'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus',
-  // Phase 5: project config + direct matter creation
-  'listProjectTypes', 'addProjectType', 'previewRefNo', 'createMatter'
+  'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus', 'deleteStaff',
+  // Phase 5/6: project config + direct matter creation
+  'listProjectTypes', 'addProjectType', 'updateProjectType', 'deleteProjectType', 'previewRefNo', 'createMatter'
 ]);
 
 async function requireStaff(request, env, supabase) {
@@ -76,9 +79,12 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'addStaff') return handleAddStaff(payload, supabase, staff);
   if (action === 'updateStaff') return handleUpdateStaff(payload, supabase, staff);
   if (action === 'setStaffStatus') return handleSetStaffStatus(payload, supabase, staff);
-  // Phase 5
+  if (action === 'deleteStaff') return handleDeleteStaff(payload, supabase, staff);
+  // Phase 5/6
   if (action === 'listProjectTypes') return handleListProjectTypes(payload, supabase);
   if (action === 'addProjectType') return handleAddProjectType(payload, supabase, staff);
+  if (action === 'updateProjectType') return handleUpdateProjectType(payload, supabase, staff);
+  if (action === 'deleteProjectType') return handleDeleteProjectType(payload, supabase, staff);
   if (action === 'previewRefNo') return handlePreviewRefNo(payload, supabase);
   if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff);
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
