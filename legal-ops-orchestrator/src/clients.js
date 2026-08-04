@@ -233,6 +233,59 @@ export function makeSupabaseClient(env) {
       return body[0].seq;
     },
 
+    /** Partial patch, same semantics as updateStaff (absent field = unchanged). */
+    async updateProjectType(projectTypeId, fields) {
+      const { ok, status, body } = await pgFetch(`/project_types?id=eq.${projectTypeId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23505') {
+          return { success: false, message: 'A project type with that name or prefix digit already exists.' };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      if (!Array.isArray(body) || body.length === 0) return { success: false, message: `Project type id ${projectTypeId} not found.` };
+      return { success: true, data: body[0] };
+    },
+
+    /**
+     * Hard delete. `matters`, `config_task_templates`, and `response_leads`
+     * all have FKs to project_types.id -- a 23503 (foreign_key_violation)
+     * is expected and normal here (it means this type has real matters
+     * or templates against it), not a bug. Reported as a clear message,
+     * not a raw PostgREST error.
+     */
+    async deleteProjectType(projectTypeId) {
+      const { ok, status, body } = await pgFetch(`/project_types?id=eq.${projectTypeId}`, { method: 'DELETE' });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23503') {
+          return { success: false, message: 'Cannot delete: this project type has matters, task templates, or leads referencing it.' };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      return { success: true };
+    },
+
+    /**
+     * Hard delete. `matter_officers` and `master_tasks.assigned_staff_id`
+     * both have FKs to staff.id -- for anyone who's ever been assigned to
+     * anything, this will hit 23503 and fail, which is intentional: use
+     * setStaffStatus (deactivate) for staff with history instead of
+     * losing that history to an orphaned/cascaded delete.
+     */
+    async deleteStaff(staffId) {
+      const { ok, status, body } = await pgFetch(`/staff?id=eq.${staffId}`, { method: 'DELETE' });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23503') {
+          return { success: false, message: 'Cannot delete: this staff member has existing matter or task assignments. Deactivate instead.' };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      return { success: true };
+    },
+
     async getProjectType(projectTypeId) {
       const { ok, body } = await pgFetch(`/project_types?id=eq.${projectTypeId}&select=id,name,prefix_digit`);
       if (!ok || !Array.isArray(body) || body.length === 0) return null;
