@@ -181,6 +181,113 @@ async function deployBlueprintsForMatter(supabase, matterId, projectTypeId) {
   return { deployed: inserted.length };
 }
 
+// --- Project config & matter creation (Phase 5) ---
+
+export async function handleListProjectTypes(payload, supabase) {
+  const projectTypes = await supabase.listProjectTypes();
+  return jsonResponse({ success: true, projectTypes });
+}
+
+/**
+ * prefix_digit is a single digit 1-9 (REF_NO_ENGINE.TOTAL_DIGITS's first
+ * slot -- see computeChecksum/mintRefNo above), and both name and
+ * prefix_digit are UNIQUE at the DB level. A 23505 conflict is reported
+ * with a clear message rather than a raw PostgREST error.
+ */
+export async function handleAddProjectType(payload, supabase, staff) {
+  if (!payload.name || payload.prefixDigit === undefined) {
+    return jsonResponse({ success: false, message: 'Missing required fields: name, prefixDigit.' });
+  }
+  const prefixDigit = Number(payload.prefixDigit);
+  if (!Number.isInteger(prefixDigit) || prefixDigit < 1 || prefixDigit > 9) {
+    return jsonResponse({ success: false, message: 'prefixDigit must be a single digit 1-9 (it becomes the first digit of every REF_NO minted for this project type).' });
+  }
+
+  const result = await supabase.insertProjectType({ name: payload.name, prefix_digit: prefixDigit });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'add_project_type', tableName: 'project_types',
+    recordId: result.data.id, detail: { name: payload.name, prefixDigit }
+  });
+
+  return jsonResponse({ success: true, projectType: result.data });
+}
+
+/**
+ * Shows what the NEXT REF_NO minted for this project type would look
+ * like -- WITHOUT touching ref_no_counters. Reads the current seq (0 if
+ * no row yet) and computes seq+1 purely for display; does NOT call
+ * incrementRefSeq, so calling this repeatedly costs nothing and never
+ * burns a real sequence slot. The actual value at creation time could
+ * differ if another matter of the same type gets created in between --
+ * this is a preview, not a reservation. Existing-matters collision was
+ * already reconciled by seeding ref_no_counters from the real, decode-
+ * verified REF_NOs already in use (see PHASE4_HANDOFF.md §2) -- this
+ * handler doesn't need to re-check that, it just reads the counter it
+ * seeded from.
+ */
+export async function handlePreviewRefNo(payload, supabase) {
+  if (!payload.projectTypeId) return jsonResponse({ success: false, message: 'Missing required field: projectTypeId.' });
+
+  const projectType = await supabase.getProjectType(payload.projectTypeId);
+  if (!projectType) return jsonResponse({ success: false, message: 'Project type not found.' });
+
+  const year = new Date().getFullYear();
+  const yearDigits = String(year).slice(-2);
+  const currentSeq = await supabase.peekRefSeq(projectType.prefix_digit, year);
+  const nextSeq = currentSeq + 1;
+
+  const seqDigits = String(nextSeq).padStart(3, '0');
+  const checksum = computeChecksum(String(projectType.prefix_digit), yearDigits, seqDigits);
+  const rawDigits = `${projectType.prefix_digit}${yearDigits}${seqDigits}${checksum}`;
+  const refNo = `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE.REF_DIGIT_SHUFFLE_MAP)}`;
+
+  return jsonResponse({ success: true, refNo, preview: true, projectType: projectType.name, year, sequence: nextSeq });
+}
+
+/**
+ * Directly creates a matter (no lead required) -- the direct-creation
+ * counterpart to promoteOneLead. Mints a REAL REF_NO via mintRefNo
+ * (consumes a sequence slot, unlike handlePreviewRefNo above).
+ *
+ * Deliberately does NOT hard-fail when config_task_templates is empty
+ * for this project type, unlike promoteOneLead -- this action exists
+ * partly so an admin can create a test matter to see what a REF_NO looks
+ * like for a project type they're still setting up, and blocking that on
+ * "you haven't finished configuring templates yet" would defeat the
+ * point. It still deploys blueprints if templates DO exist, and reports
+ * deployedCount either way so the caller can tell which happened.
+ */
+export async function handleCreateMatter(payload, supabase, staff) {
+  if (!payload.projectTypeId || !payload.clientName) {
+    return jsonResponse({ success: false, message: 'Missing required fields: projectTypeId, clientName.' });
+  }
+
+  const projectType = await supabase.getProjectType(payload.projectTypeId);
+  if (!projectType) return jsonResponse({ success: false, message: 'Project type not found.' });
+
+  const refNo = await mintRefNo(supabase, projectType);
+
+  const newMatter = await supabase.insertMatter({
+    ref_no: refNo,
+    client_name: payload.clientName,
+    client_email: payload.clientEmail || null,
+    project_type_id: payload.projectTypeId,
+    status: 'Draft',
+    progress_pct: 0
+  });
+
+  const deployResult = await deployBlueprintsForMatter(supabase, newMatter.id, payload.projectTypeId);
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'create_matter', tableName: 'matters',
+    recordId: newMatter.id, detail: { refNo, projectTypeId: payload.projectTypeId, deployedCount: deployResult.deployed }
+  });
+
+  return jsonResponse({ success: true, matter: newMatter, deployedCount: deployResult.deployed });
+}
+
 export async function handleListMatters(payload, supabase) {
   const matters = await supabase.listMatters();
   return jsonResponse({ success: true, matters });
@@ -319,6 +426,22 @@ export async function handleDeployBlueprints(payload, supabase, staff) {
   return jsonResponse({ success: true, deployedCount: result.deployed });
 }
 
+// Shared by promoteOneLead and handleCreateMatter (Phase 5) -- refactored
+// out so there is exactly one place that mints a REF_NO, instead of two
+// copies that could silently drift apart. This DOES consume a real
+// sequence number via incrementRefSeq -- it's not a preview, see
+// handlePreviewRefNo below for the non-destructive version.
+async function mintRefNo(supabase, projectType) {
+  const year = new Date().getFullYear();
+  const yearDigits = String(year).slice(-2);
+  const seq = await supabase.incrementRefSeq(projectType.prefix_digit, year);
+
+  const seqDigits = String(seq).padStart(3, '0');
+  const checksum = computeChecksum(String(projectType.prefix_digit), yearDigits, seqDigits);
+  const rawDigits = `${projectType.prefix_digit}${yearDigits}${seqDigits}${checksum}`;
+  return `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE.REF_DIGIT_SHUFFLE_MAP)}`;
+}
+
 async function promoteOneLead(supabase, lead) {
   const templates = await supabase.getConfigTaskTemplates(lead.project_type_id);
   if (!templates || templates.length === 0) {
@@ -328,14 +451,7 @@ async function promoteOneLead(supabase, lead) {
   const projectType = await supabase.getProjectType(lead.project_type_id);
   if (!projectType) throw new Error(`project_type_id ${lead.project_type_id} not found.`);
 
-  const year = new Date().getFullYear();
-  const yearDigits = String(year).slice(-2);
-  const seq = await supabase.incrementRefSeq(projectType.prefix_digit, year);
-
-  const seqDigits = String(seq).padStart(3, '0');
-  const checksum = computeChecksum(String(projectType.prefix_digit), yearDigits, seqDigits);
-  const rawDigits = `${projectType.prefix_digit}${yearDigits}${seqDigits}${checksum}`;
-  const refNo = `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE.REF_DIGIT_SHUFFLE_MAP)}`;
+  const refNo = await mintRefNo(supabase, projectType);
 
   const newMatter = await supabase.insertMatter({
     ref_no: refNo,
