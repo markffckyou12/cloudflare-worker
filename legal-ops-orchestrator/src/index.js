@@ -24,7 +24,11 @@ import {
   handleListStaff,
   handleAddStaff,
   handleUpdateStaff,
-  handleSetStaffStatus
+  handleSetStaffStatus,
+  handleListProjectTypes,
+  handleAddProjectType,
+  handlePreviewRefNo,
+  handleCreateMatter
 } from './handlers.js';
 
 // Admin UI actions authenticate a human staff member via a Supabase Auth
@@ -33,8 +37,10 @@ import {
 // Everything else on this router keeps using authToken as before.
 const ADMIN_ACTIONS = new Set([
   'deployBlueprints', 'promoteLeads', 'decodeRef', 'sendAck', 'sendProgress', 'listMatters', 'listLeads',
-  // NEW (Phase 4): staff management
-  'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus'
+  // Phase 4: staff management
+  'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus',
+  // Phase 5: project config + direct matter creation
+  'listProjectTypes', 'addProjectType', 'previewRefNo', 'createMatter'
 ]);
 
 async function requireStaff(request, env, supabase) {
@@ -70,6 +76,11 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'addStaff') return handleAddStaff(payload, supabase, staff);
   if (action === 'updateStaff') return handleUpdateStaff(payload, supabase, staff);
   if (action === 'setStaffStatus') return handleSetStaffStatus(payload, supabase, staff);
+  // Phase 5
+  if (action === 'listProjectTypes') return handleListProjectTypes(payload, supabase);
+  if (action === 'addProjectType') return handleAddProjectType(payload, supabase, staff);
+  if (action === 'previewRefNo') return handlePreviewRefNo(payload, supabase);
+  if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff);
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
 }
 
