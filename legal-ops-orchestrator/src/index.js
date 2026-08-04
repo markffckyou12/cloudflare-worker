@@ -26,6 +26,7 @@ import {
   handleUpdateStaff,
   handleSetStaffStatus,
   handleDeleteStaff,
+  handleWhoAmI,
   handleListProjectTypes,
   handleAddProjectType,
   handleUpdateProjectType,
@@ -41,7 +42,7 @@ import {
 const ADMIN_ACTIONS = new Set([
   'deployBlueprints', 'promoteLeads', 'decodeRef', 'sendAck', 'sendProgress', 'listMatters', 'listLeads',
   // Phase 4: staff management
-  'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus', 'deleteStaff',
+  'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus', 'deleteStaff', 'whoAmI',
   // Phase 5/6: project config + direct matter creation
   'listProjectTypes', 'addProjectType', 'updateProjectType', 'deleteProjectType', 'previewRefNo', 'createMatter'
 ]);
@@ -80,6 +81,7 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'updateStaff') return handleUpdateStaff(payload, supabase, staff);
   if (action === 'setStaffStatus') return handleSetStaffStatus(payload, supabase, staff);
   if (action === 'deleteStaff') return handleDeleteStaff(payload, supabase, staff);
+  if (action === 'whoAmI') return handleWhoAmI(payload, supabase, staff);
   // Phase 5/6
   if (action === 'listProjectTypes') return handleListProjectTypes(payload, supabase);
   if (action === 'addProjectType') return handleAddProjectType(payload, supabase, staff);
