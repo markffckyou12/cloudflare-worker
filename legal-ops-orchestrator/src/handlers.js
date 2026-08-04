@@ -131,16 +131,31 @@ export async function handleSlackSubmission(payload, db) {
 // JWT by index.js's requireStaff() before any of these run.
 // =========================================================================
 
-// REF_NO_ENGINE — ported verbatim from database-service/identityservice.js.
-// Verified: round-tripped synthetic inputs through encode+decode, AND
-// decoded three real REF_NOs seen in this project's own conversation
-// history (TP/02101216, TP/02102136, TP/02105256) -- all valid, sensible
-// years/sequences. Do not change REF_DIGIT_SHUFFLE_MAP independently of
-// config.js's copy -- they must stay identical or decoding breaks.
-const REF_NO_ENGINE = { TOTAL_DIGITS: 8, REF_DIGIT_SHUFFLE_MAP: [5, 1, 7, 0, 3, 6, 2, 4] };
+// REF_NO_ENGINE — V1 ported verbatim from database-service/identityservice.js
+// (single-digit prefix, 8 raw digits total). V2 added Phase 6 to support
+// prefix_digit up to 999, per explicit request accepting the format
+// change -- see PHASE6_HANDOFF.md for the decision record.
+//
+// V1 is decode-ONLY from here on: it must never be used to mint a new
+// REF_NO again, but it must also never be deleted or have its shuffle
+// map changed, because the 11 real REF_NOs already issued under it
+// (TP/02101216, TP/02102136, TP/02105256, and 8 others -- see
+// PHASE4_HANDOFF.md §1 for which of the 33 migrated matters were the
+// genuinely valid ones) still need to decode correctly forever.
+//
+// V2 is what mintRefNo uses for every new REF_NO from now on --
+// including for the existing Subsale/Litigation/Tax project types
+// (prefix_digit 1/2/3), even though those would technically still fit
+// in V1's single digit. Uniform format going forward (rather than
+// conditionally picking V1 vs V2 by prefix size) means there's never
+// ambiguity about which scheme decodes a given new REF_NO. Practical
+// effect: every REF_NO minted from Phase 6 onward is 10 raw digits
+// instead of 8, i.e. visibly longer than the ones already issued.
+const REF_NO_ENGINE_V1 = { TOTAL_DIGITS: 8, PREFIX_LEN: 1, SHUFFLE_MAP: [5, 1, 7, 0, 3, 6, 2, 4] };
+const REF_NO_ENGINE_V2 = { TOTAL_DIGITS: 10, PREFIX_LEN: 3, SHUFFLE_MAP: [6, 2, 8, 0, 4, 9, 1, 5, 3, 7] };
 
-function computeChecksum(prefixDigit, yearDigits, seqDigits) {
-  const digits = `${prefixDigit}${yearDigits}${seqDigits}`.split('').map(Number);
+function computeChecksum(prefixDigits, yearDigits, seqDigits) {
+  const digits = `${prefixDigits}${yearDigits}${seqDigits}`.split('').map(Number);
   const sum = digits.reduce((acc, d) => acc + d, 0);
   return String(sum % 97).padStart(2, '0').slice(-2);
 }
@@ -154,17 +169,24 @@ function unshuffleDigits(shuffledDigits, map) {
   for (let outPos = 0; outPos < map.length; outPos++) output[outPos] = shuffledDigits[map[outPos]];
   return output.join('');
 }
+
+/** Tries V1 (8 digits) then V2 (10 digits) based on length, so old and new REF_NOs both decode correctly. */
 export function decodeRefNo(refNo) {
   const cleaned = String(refNo).replace(/^TP\//i, '').trim();
-  if (cleaned.length !== REF_NO_ENGINE.TOTAL_DIGITS) return { valid: false, reason: 'wrong_length' };
-  const rawDigits = unshuffleDigits(cleaned, REF_NO_ENGINE.REF_DIGIT_SHUFFLE_MAP);
-  const prefixDigit = rawDigits.slice(0, 1);
-  const yearDigits = rawDigits.slice(1, 3);
-  const seqDigits = rawDigits.slice(3, 6);
-  const checksum = rawDigits.slice(6, 8);
-  const expected = computeChecksum(prefixDigit, yearDigits, seqDigits);
+
+  let engine;
+  if (cleaned.length === REF_NO_ENGINE_V1.TOTAL_DIGITS) engine = REF_NO_ENGINE_V1;
+  else if (cleaned.length === REF_NO_ENGINE_V2.TOTAL_DIGITS) engine = REF_NO_ENGINE_V2;
+  else return { valid: false, reason: 'wrong_length' };
+
+  const rawDigits = unshuffleDigits(cleaned, engine.SHUFFLE_MAP);
+  const prefixDigits = rawDigits.slice(0, engine.PREFIX_LEN);
+  const yearDigits = rawDigits.slice(engine.PREFIX_LEN, engine.PREFIX_LEN + 2);
+  const seqDigits = rawDigits.slice(engine.PREFIX_LEN + 2, engine.PREFIX_LEN + 5);
+  const checksum = rawDigits.slice(engine.PREFIX_LEN + 5, engine.PREFIX_LEN + 7);
+  const expected = computeChecksum(prefixDigits, yearDigits, seqDigits);
   if (checksum !== expected) return { valid: false, reason: 'checksum_mismatch' };
-  return { valid: true, prefixDigit, year: Number(`20${yearDigits}`), sequence: Number(seqDigits) };
+  return { valid: true, prefixDigit: Number(prefixDigits), year: Number(`20${yearDigits}`), sequence: Number(seqDigits) };
 }
 
 async function deployBlueprintsForMatter(supabase, matterId, projectTypeId) {
@@ -199,8 +221,8 @@ export async function handleAddProjectType(payload, supabase, staff) {
     return jsonResponse({ success: false, message: 'Missing required fields: name, prefixDigit.' });
   }
   const prefixDigit = Number(payload.prefixDigit);
-  if (!Number.isInteger(prefixDigit) || prefixDigit < 1 || prefixDigit > 9) {
-    return jsonResponse({ success: false, message: 'prefixDigit must be a single digit 1-9 (it becomes the first digit of every REF_NO minted for this project type).' });
+  if (!Number.isInteger(prefixDigit) || prefixDigit < 1 || prefixDigit > 999) {
+    return jsonResponse({ success: false, message: 'prefixDigit must be an integer from 1-999.' });
   }
 
   const result = await supabase.insertProjectType({ name: payload.name, prefix_digit: prefixDigit });
@@ -212,6 +234,50 @@ export async function handleAddProjectType(payload, supabase, staff) {
   });
 
   return jsonResponse({ success: true, projectType: result.data });
+}
+
+export async function handleUpdateProjectType(payload, supabase, staff) {
+  if (!payload.projectTypeId) return jsonResponse({ success: false, message: 'Missing required field: projectTypeId.' });
+
+  const fields = {};
+  if (payload.name !== undefined) fields.name = payload.name;
+  if (payload.prefixDigit !== undefined) {
+    const prefixDigit = Number(payload.prefixDigit);
+    if (!Number.isInteger(prefixDigit) || prefixDigit < 1 || prefixDigit > 999) {
+      return jsonResponse({ success: false, message: 'prefixDigit must be an integer from 1-999.' });
+    }
+    fields.prefix_digit = prefixDigit;
+  }
+  if (Object.keys(fields).length === 0) return jsonResponse({ success: false, message: 'No editable fields provided.' });
+
+  const result = await supabase.updateProjectType(payload.projectTypeId, fields);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'update_project_type', tableName: 'project_types',
+    recordId: payload.projectTypeId, detail: fields
+  });
+
+  return jsonResponse({ success: true, projectType: result.data });
+}
+
+/**
+ * Hard delete. Expected to fail with a clear message if this type has
+ * any matters, config_task_templates, or response_leads referencing it
+ * (see clients.js's deleteProjectType) -- that's the FK doing its job,
+ * not a bug to work around.
+ */
+export async function handleDeleteProjectType(payload, supabase, staff) {
+  if (!payload.projectTypeId) return jsonResponse({ success: false, message: 'Missing required field: projectTypeId.' });
+
+  const result = await supabase.deleteProjectType(payload.projectTypeId);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_project_type', tableName: 'project_types', recordId: payload.projectTypeId
+  });
+
+  return jsonResponse({ success: true });
 }
 
 /**
@@ -238,10 +304,11 @@ export async function handlePreviewRefNo(payload, supabase) {
   const currentSeq = await supabase.peekRefSeq(projectType.prefix_digit, year);
   const nextSeq = currentSeq + 1;
 
+  const prefixDigits = String(projectType.prefix_digit).padStart(REF_NO_ENGINE_V2.PREFIX_LEN, '0');
   const seqDigits = String(nextSeq).padStart(3, '0');
-  const checksum = computeChecksum(String(projectType.prefix_digit), yearDigits, seqDigits);
-  const rawDigits = `${projectType.prefix_digit}${yearDigits}${seqDigits}${checksum}`;
-  const refNo = `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE.REF_DIGIT_SHUFFLE_MAP)}`;
+  const checksum = computeChecksum(prefixDigits, yearDigits, seqDigits);
+  const rawDigits = `${prefixDigits}${yearDigits}${seqDigits}${checksum}`;
+  const refNo = `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE_V2.SHUFFLE_MAP)}`;
 
   return jsonResponse({ success: true, refNo, preview: true, projectType: projectType.name, year, sequence: nextSeq });
 }
@@ -402,6 +469,25 @@ export async function handleSetStaffStatus(payload, supabase, staff) {
   return jsonResponse({ success: true, staff: result.data });
 }
 
+/**
+ * Hard delete -- distinct from setStaffStatus (deactivate). Expected to
+ * fail with a clear message for any staff member who's ever been
+ * assigned to a matter or task (see clients.js's deleteStaff for why);
+ * that's not a bug, deactivate is the right tool for that case.
+ */
+export async function handleDeleteStaff(payload, supabase, staff) {
+  if (!payload.staffId) return jsonResponse({ success: false, message: 'Missing required field: staffId.' });
+
+  const result = await supabase.deleteStaff(payload.staffId);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_staff', tableName: 'staff', recordId: payload.staffId
+  });
+
+  return jsonResponse({ success: true });
+}
+
 export async function handleDeployBlueprints(payload, supabase, staff) {
   if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
 
@@ -436,10 +522,11 @@ async function mintRefNo(supabase, projectType) {
   const yearDigits = String(year).slice(-2);
   const seq = await supabase.incrementRefSeq(projectType.prefix_digit, year);
 
+  const prefixDigits = String(projectType.prefix_digit).padStart(REF_NO_ENGINE_V2.PREFIX_LEN, '0');
   const seqDigits = String(seq).padStart(3, '0');
-  const checksum = computeChecksum(String(projectType.prefix_digit), yearDigits, seqDigits);
-  const rawDigits = `${projectType.prefix_digit}${yearDigits}${seqDigits}${checksum}`;
-  return `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE.REF_DIGIT_SHUFFLE_MAP)}`;
+  const checksum = computeChecksum(prefixDigits, yearDigits, seqDigits);
+  const rawDigits = `${prefixDigits}${yearDigits}${seqDigits}${checksum}`;
+  return `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE_V2.SHUFFLE_MAP)}`;
 }
 
 async function promoteOneLead(supabase, lead) {
