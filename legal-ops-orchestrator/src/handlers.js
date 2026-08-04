@@ -488,6 +488,17 @@ export async function handleDeleteStaff(payload, supabase, staff) {
   return jsonResponse({ success: true });
 }
 
+/** Trivial by design -- requireStaff() has already done all the real work
+ *  (verified the JWT, confirmed it's linked to an active staff row)
+ *  before this ever runs. Exists so the frontend can explicitly check
+ *  "am I an authorized staff member" right after sign-in and force a
+ *  sign-out with a clear message if not, instead of leaving a
+ *  self-registered-but-unauthorized account sitting on a dashboard where
+ *  every action just fails one by one. */
+export async function handleWhoAmI(payload, supabase, staff) {
+  return jsonResponse({ success: true, staff });
+}
+
 export async function handleDeployBlueprints(payload, supabase, staff) {
   if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
 
