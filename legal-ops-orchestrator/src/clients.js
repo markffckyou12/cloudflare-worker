@@ -195,16 +195,19 @@ export function makeSupabaseClient(env) {
       if (!ins.ok) throw new Error(`Failed to set matter_officers: ${JSON.stringify(ins.body)}`);
     },
 
-    /** `matter_officers`, `master_tasks`, `master_comments` all FK to
-     *  matters.id, and `response_leads.converted_matter_id` does too --
-     *  expect 23503 for any matter that actually has real activity
-     *  against it. In practice this will mostly succeed only for a
-     *  freshly-created matter with no tasks/comments/officers yet. */
+    /** IMPORTANT: matter_officers, master_tasks, and master_comments all
+     *  have ON DELETE CASCADE to matters.id -- deleting a matter silently
+     *  wipes all of its officers/tasks/comments too, no FK violation.
+     *  The ONLY thing that actually blocks a delete is
+     *  response_leads.converted_matter_id (no ON DELETE clause =
+     *  RESTRICT), i.e. a matter that was created by promoting a lead.
+     *  The caller MUST warn about the cascade before calling this --
+     *  there's no going back once it succeeds. */
     async deleteMatter(matterId) {
       const { ok, status, body } = await pgFetch(`/matters?id=eq.${matterId}`, { method: 'DELETE' });
       if (!ok) {
         if (status === 409 && body && body.code === '23503') {
-          return { success: false, message: 'Cannot delete: this matter has tasks, comments, officers, or a linked lead referencing it.' };
+          return { success: false, message: 'Cannot delete: this matter was created from a lead that still references it.' };
         }
         return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
       }
@@ -213,7 +216,9 @@ export function makeSupabaseClient(env) {
 
     /** Recent leads for the admin UI's browsable list (all statuses, not just Pending). */
     async listLeads(limit = 50) {
-      const { ok, body } = await pgFetch(`/response_leads?select=id,lead_name,lead_email,acknowledge_status,project_type_id,created_at&order=created_at.desc&limit=${limit}`);
+      const { ok, body } = await pgFetch(
+        `/response_leads?select=id,lead_name,lead_email,lead_phone,inquiry_notes,acknowledge_status,project_type_id,project_types(name),converted_matter_id,matters!response_leads_converted_matter_id_fkey(ref_no),created_at&order=created_at.desc&limit=${limit}`
+      );
       if (!ok) throw new Error(`Failed to list leads: ${JSON.stringify(body)}`);
       return body || [];
     },
@@ -424,8 +429,101 @@ export function makeSupabaseClient(env) {
       return body;
     },
 
+    /** Manual lead entry (Phase 9) -- the original design only ever
+     *  populated response_leads via email intake (writeLead, called by
+     *  email-gateway). This is for logging a lead that came in some
+     *  other way (phone call, walk-in, etc.) so it still goes through
+     *  the same promoteLeads flow as everything else. acknowledge_status
+     *  always starts 'Pending' -- promotion/skip happen as separate
+     *  actions, same as email-sourced leads. */
+    async insertLeadManual(fields) {
+      const { ok, status, body } = await pgFetch('/response_leads', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify({ ...fields, acknowledge_status: 'Pending' })
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
+    },
+
     async insertSystemHealthLog(entry) {
       await pgFetch('/system_health_logs', { method: 'POST', body: JSON.stringify(entry) });
+    },
+
+    // --- Master tasks (Phase 9) ---
+
+    async listMasterTasksFor(matterId) {
+      const { ok, body } = await pgFetch(
+        `/master_tasks?matter_id=eq.${matterId}&select=id,title,sequence,is_completed,completion_date,assigned_staff_id,notification_status,staff(name,initial)&order=sequence`
+      );
+      if (!ok) throw new Error(`Failed to list master_tasks: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
+    async insertMasterTask(fields) {
+      const { ok, status, body } = await pgFetch('/master_tasks', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
+    },
+
+    async updateMasterTask(taskId, fields) {
+      const { ok, status, body } = await pgFetch(`/master_tasks?id=eq.${taskId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      if (!Array.isArray(body) || body.length === 0) return { success: false, message: `Task id ${taskId} not found.` };
+      return { success: true, data: body[0] };
+    },
+
+    /** master_comments.task_id has ON DELETE SET NULL -- deleting a task
+     *  that has comments against it is safe, those comments just lose
+     *  their task link (stay attached to the matter). No 23503 case
+     *  expected here. */
+    async deleteMasterTask(taskId) {
+      const { ok, status, body } = await pgFetch(`/master_tasks?id=eq.${taskId}`, { method: 'DELETE' });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      return { success: true };
+    },
+
+    // --- Master comments (Phase 9) ---
+
+    async listMasterCommentsFor(matterId) {
+      const { ok, body } = await pgFetch(
+        `/master_comments?matter_id=eq.${matterId}&select=id,author,comment_text,comment_status,created_at,task_id&order=created_at.desc`
+      );
+      if (!ok) throw new Error(`Failed to list master_comments: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
+    async insertMasterComment(fields) {
+      const { ok, status, body } = await pgFetch('/master_comments', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
+    },
+
+    /** Comments are soft-deleted (comment_status='Deleted'), never hard
+     *  deleted -- there's no hard-delete action for these, deliberately,
+     *  since a comment log is exactly the kind of thing you want an
+     *  audit trail of even after it's "removed" from view. */
+    async updateMasterComment(commentId, fields) {
+      const { ok, status, body } = await pgFetch(`/master_comments?id=eq.${commentId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      if (!Array.isArray(body) || body.length === 0) return { success: false, message: `Comment id ${commentId} not found.` };
+      return { success: true, data: body[0] };
     },
 
     // --- Staff management (Phase 4) ---
