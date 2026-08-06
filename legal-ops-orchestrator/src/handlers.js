@@ -984,3 +984,280 @@ export async function handleWriteLead(payload, supabase, env) {
 
   return jsonResponse({ success: true, message: 'Lead written successfully.' });
 }
+
+// =========================================================================
+// CONTENT / BLOG POSTS (Phase 10). The Astro repo's src/content/blog/*.md
+// files are the single source of truth -- deliberately NOT mirrored into a
+// Supabase table (decision: keep git as the only place "what the site's
+// content is" lives, for one source of truth and free version history, at
+// the cost of a GitHub API round trip per file).
+// =========================================================================
+
+const BLOG_DIR = 'src/content/blog';
+
+function slugify(title) {
+  return String(title).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+}
+
+/** Hand-rolled and deliberately minimal -- this only ever reads
+ *  frontmatter that buildFrontmatter (below) wrote, so it doesn't need to
+ *  be a general YAML parser. Not safe to point at arbitrary external
+ *  Markdown. */
+function parseFrontmatter(raw) {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { data: {}, body: raw };
+  const [, frontBlock, body] = match;
+  const data = {};
+  frontBlock.split(/\r?\n/).forEach((line) => {
+    const lineMatch = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+    if (!lineMatch) return;
+    const [, key, rawValue] = lineMatch;
+    let value = rawValue.trim();
+    if (value === 'true') value = true;
+    else if (value === 'false') value = false;
+    else if (value.startsWith('"') && value.endsWith('"')) {
+      try { value = JSON.parse(value); } catch { /* leave as raw string */ }
+    }
+    data[key] = value;
+  });
+  return { data, body: body.replace(/^\r?\n/, '') };
+}
+
+/** JSON.stringify on title/excerpt doubles as YAML double-quoted-scalar
+ *  escaping (YAML's flow scalars are a superset of JSON strings) -- both a
+ *  JS and a YAML-safe encoder with no extra dependency. */
+function buildFrontmatter({ title, date, excerpt, draft }) {
+  const lines = ['---', `title: ${JSON.stringify(title)}`, `date: ${date}`, `excerpt: ${JSON.stringify(excerpt)}`];
+  if (draft) lines.push('draft: true');
+  lines.push('---', '');
+  return lines.join('\n');
+}
+
+/** List view only returns frontmatter, not body -- avoids fetching+parsing
+ *  every post's full content just to render a list of titles. */
+export async function handleListPosts(payload, github) {
+  let files;
+  try {
+    files = await github.listDir(BLOG_DIR);
+  } catch (err) {
+    return jsonResponse({ success: false, message: err.message });
+  }
+
+  const posts = await Promise.all(files.map(async (file) => {
+    const fileData = await github.getFile(file.path);
+    const { data } = parseFrontmatter(fileData.content);
+    return {
+      slug: file.name.replace(/\.md$/, ''),
+      title: data.title || file.name,
+      date: data.date || null,
+      excerpt: data.excerpt || '',
+      draft: !!data.draft
+    };
+  }));
+
+  posts.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return jsonResponse({ success: true, posts });
+}
+
+export async function handleGetPost(payload, github) {
+  if (!payload.slug) return jsonResponse({ success: false, message: 'Missing required field: slug.' });
+  const fileData = await github.getFile(`${BLOG_DIR}/${payload.slug}.md`);
+  if (!fileData) return jsonResponse({ success: false, message: `Post "${payload.slug}" not found.` });
+  const { data, body } = parseFrontmatter(fileData.content);
+  return jsonResponse({ success: true, post: { slug: payload.slug, ...data, body } });
+}
+
+/**
+ * Creates or updates a post in one GitHub commit. `slug` is the filename
+ * and the live URL, so it's never editable once set: the caller passes it
+ * back unchanged to update a post, or omits it to create one, in which
+ * case it's derived from the title. A title collision gets a numeric
+ * suffix rather than silently overwriting an unrelated existing post.
+ */
+export async function handleSavePost(payload, github, supabase, staff) {
+  if (!payload.title || !payload.date || !payload.excerpt || !payload.body) {
+    return jsonResponse({ success: false, message: 'Missing required fields: title, date, excerpt, body.' });
+  }
+
+  let slug = payload.slug;
+  let existing = null;
+  if (slug) {
+    existing = await github.getFile(`${BLOG_DIR}/${slug}.md`);
+    if (!existing) return jsonResponse({ success: false, message: `Post "${slug}" not found.` });
+  } else {
+    const base = slugify(payload.title);
+    slug = base;
+    let n = 2;
+    // Sequential by nature -- each check depends on the previous suffix not existing.
+    // eslint-disable-next-line no-await-in-loop
+    while (await github.getFile(`${BLOG_DIR}/${slug}.md`)) {
+      slug = `${base}-${n}`;
+      n += 1;
+    }
+  }
+
+  const content = buildFrontmatter(payload) + payload.body.trim() + '\n';
+
+  try {
+    await github.putFile(
+      `${BLOG_DIR}/${slug}.md`,
+      content,
+      `${existing ? 'Update' : 'Add'} blog post: ${payload.title}`,
+      existing ? existing.sha : undefined
+    );
+  } catch (err) {
+    return jsonResponse({ success: false, message: err.message });
+  }
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: existing ? 'update_post' : 'add_post',
+    tableName: 'blog_posts', recordId: null, detail: { slug, title: payload.title }
+  });
+
+  return jsonResponse({ success: true, slug });
+}
+
+export async function handleDeletePost(payload, github, supabase, staff) {
+  if (!payload.slug) return jsonResponse({ success: false, message: 'Missing required field: slug.' });
+  const filePath = `${BLOG_DIR}/${payload.slug}.md`;
+  const existing = await github.getFile(filePath);
+  if (!existing) return jsonResponse({ success: false, message: `Post "${payload.slug}" not found.` });
+
+  try {
+    await github.deleteFile(filePath, existing.sha, `Delete blog post: ${payload.slug}`);
+  } catch (err) {
+    return jsonResponse({ success: false, message: err.message });
+  }
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_post', tableName: 'blog_posts', recordId: null, detail: { slug: payload.slug }
+  });
+
+  return jsonResponse({ success: true });
+}
+
+// =========================================================================
+// AI-ASSISTED CONTENT REVIEW (Phase 11). Deliberately split into two parts
+// that never touch each other's job:
+//   - Scheduling suggestion: plain date arithmetic over real post history
+//     pulled from GitHub. No model involved -- a suggested publish date is
+//     a fact people will act on, not a judgment call worth an LLM's
+//     nondeterminism.
+//   - Everything else (title/SEO/clarity/sourcing flags): genuinely
+//     judgment calls, where a model is useful precisely because it's
+//     giving an opinion, not a fact. Every finding is worded as a
+//     suggestion for a human to accept or reject -- see the prompt's
+//     explicit "flag, don't assert" instruction for sourcingFlags in
+//     particular, since a law firm publishing an AI's confidently wrong
+//     legal claim is a real reputational risk, not a hypothetical one.
+// =========================================================================
+
+const REVIEW_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+
+/** Suggests a publish date at least MIN_GAP_DAYS after the most recently
+ *  scheduled/published post, using the average gap between the last few
+ *  posts as the step size once there's enough history to have one.
+ *  Never returns a date already in use. */
+function suggestScheduleDate(existingDates) {
+  const MIN_GAP_DAYS = 3;
+  const DEFAULT_GAP_DAYS = 7;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  const parsed = existingDates
+    .map((d) => new Date(d))
+    .filter((d) => !Number.isNaN(d.valueOf()))
+    .sort((a, b) => a - b);
+
+  if (parsed.length === 0) {
+    return new Date(Date.now() + DEFAULT_GAP_DAYS * DAY_MS).toISOString().slice(0, 10);
+  }
+
+  const last = parsed[parsed.length - 1];
+  let gapDays = DEFAULT_GAP_DAYS;
+  if (parsed.length >= 2) {
+    const recentGaps = [];
+    for (let i = Math.max(1, parsed.length - 3); i < parsed.length; i++) {
+      recentGaps.push((parsed[i] - parsed[i - 1]) / DAY_MS);
+    }
+    const avg = recentGaps.reduce((sum, g) => sum + g, 0) / recentGaps.length;
+    gapDays = Math.max(MIN_GAP_DAYS, Math.round(avg));
+  }
+
+  let candidate = new Date(Math.max(last.valueOf(), Date.now()) + gapDays * DAY_MS);
+  const usedDates = new Set(parsed.map((d) => d.toISOString().slice(0, 10)));
+  while (usedDates.has(candidate.toISOString().slice(0, 10))) {
+    candidate = new Date(candidate.valueOf() + DAY_MS);
+  }
+  return candidate.toISOString().slice(0, 10);
+}
+
+const REVIEW_SYSTEM_PROMPT = `You are an editorial assistant reviewing a draft blog post for a Malaysian law firm's website before a human editor publishes it. Respond with ONLY a single valid JSON object, no other text, matching exactly this shape:
+{
+  "titleFeedback": "1-2 sentences on the title's clarity and search-friendliness",
+  "metaDescriptionSuggestion": "a single suggested meta description, under 160 characters",
+  "keywordSuggestions": ["3-6 short phrases a reader might search for that relate to this post"],
+  "clarityNotes": "1-3 sentences on structure, tone, or readability",
+  "sourcingFlags": ["specific claims, statistics, or statements of law in the draft that should be checked against a real source before publishing -- empty array if none stand out"],
+  "overallNote": "one sentence summarizing your overall impression"
+}
+Do not invent facts, sources, or legal citations. sourcingFlags should name what needs checking, not claim to have checked it. If the draft is short or thin, say so plainly rather than inventing detail to praise.`;
+
+/**
+ * payload: { title, excerpt, body }. Fetches existing post dates itself
+ * (via github) rather than trusting the caller to supply accurate
+ * scheduling context.
+ */
+export async function handleReviewPost(payload, ai, github) {
+  if (!payload.title || !payload.body) {
+    return jsonResponse({ success: false, message: 'Missing required fields: title, body.' });
+  }
+
+  let existingDates = [];
+  try {
+    const files = await github.listDir(BLOG_DIR);
+    const parsedPosts = await Promise.all(files.map(async (file) => {
+      const fileData = await github.getFile(file.path);
+      const { data } = parseFrontmatter(fileData.content);
+      return data.date;
+    }));
+    existingDates = parsedPosts.filter(Boolean);
+  } catch (err) {
+    // Scheduling context is a nice-to-have, not required -- fall through
+    // with an empty history rather than failing the whole review over it.
+    console.error(`reviewPost: failed to read post history for scheduling: ${err.message}`);
+  }
+  const scheduleSuggestion = suggestScheduleDate(existingDates);
+
+  const userContent = `Title: ${payload.title}\n\nExcerpt: ${payload.excerpt || '(none provided)'}\n\nBody:\n${payload.body}`;
+
+  let aiResult;
+  try {
+    aiResult = await ai.run(REVIEW_MODEL, {
+      messages: [
+        { role: 'system', content: REVIEW_SYSTEM_PROMPT },
+        { role: 'user', content: userContent }
+      ]
+    });
+  } catch (err) {
+    return jsonResponse({
+      success: true,
+      review: { scheduleSuggestion, aiAvailable: false, aiError: err.message }
+    });
+  }
+
+  const raw = (aiResult && aiResult.response) || '';
+  let parsed;
+  try {
+    // Models sometimes wrap JSON in a code fence despite instructions --
+    // strip one if present before parsing, rather than failing on it.
+    const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    return jsonResponse({
+      success: true,
+      review: { scheduleSuggestion, aiAvailable: true, aiParseError: true, rawResponse: raw }
+    });
+  }
+
+  return jsonResponse({ success: true, review: { ...parsed, scheduleSuggestion, aiAvailable: true } });
+}
