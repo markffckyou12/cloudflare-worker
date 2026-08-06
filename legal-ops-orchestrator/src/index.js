@@ -8,7 +8,7 @@
 // =========================================================================
 
 import { jsonResponse, verifyInternalToken } from './shared-http.js';
-import { makeDatabaseClient, makeSlackClient, makeSupabaseClient, verifyStaffJwt } from './clients.js';
+import { makeDatabaseClient, makeGithubClient, makeSlackClient, makeSupabaseClient, verifyStaffJwt } from './clients.js';
 import {
   handleProvisionSlackWorkflow,
   handleRefreshMatterCard,
@@ -47,7 +47,12 @@ import {
   handleListConfigTaskTemplates,
   handleAddConfigTaskTemplate,
   handleUpdateConfigTaskTemplate,
-  handleDeleteConfigTaskTemplate
+  handleDeleteConfigTaskTemplate,
+  handleListPosts,
+  handleGetPost,
+  handleSavePost,
+  handleDeletePost,
+  handleReviewPost
 } from './handlers.js';
 
 // Admin UI actions authenticate a human staff member via a Supabase Auth
@@ -65,7 +70,11 @@ const ADMIN_ACTIONS = new Set([
   // Phase 9: tasks, comments, manual/skip leads
   'addLead', 'skipLead',
   'listMasterTasks', 'addMasterTask', 'updateMasterTask', 'deleteMasterTask',
-  'listMasterComments', 'addMasterComment', 'deleteMasterComment'
+  'listMasterComments', 'addMasterComment', 'deleteMasterComment',
+  // Phase 10: content editing (commits directly to the Astro site's GitHub repo)
+  'listPosts', 'getPost', 'savePost', 'deletePost',
+  // Phase 11: AI-assisted review
+  'reviewPost'
 ]);
 
 async function requireStaff(request, env, supabase) {
@@ -88,7 +97,7 @@ async function requireStaff(request, env, supabase) {
   return { staff };
 }
 
-async function routeAdminAction(action, payload, supabase, staff) {
+async function routeAdminAction(action, payload, supabase, staff, github, ai) {
   if (action === 'deployBlueprints') return handleDeployBlueprints(payload, supabase, staff);
   if (action === 'promoteLeads') return handlePromoteLeads(payload, supabase, staff);
   if (action === 'decodeRef') return handleDecodeRef(payload, supabase);
@@ -127,6 +136,13 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'listMasterComments') return handleListMasterComments(payload, supabase);
   if (action === 'addMasterComment') return handleAddMasterComment(payload, supabase, staff);
   if (action === 'deleteMasterComment') return handleDeleteMasterComment(payload, supabase, staff);
+  // Phase 10
+  if (action === 'listPosts') return handleListPosts(payload, github);
+  if (action === 'getPost') return handleGetPost(payload, github);
+  if (action === 'savePost') return handleSavePost(payload, github, supabase, staff);
+  if (action === 'deletePost') return handleDeletePost(payload, github, supabase, staff);
+  // Phase 11
+  if (action === 'reviewPost') return handleReviewPost(payload, ai, github);
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
 }
 
@@ -156,13 +172,14 @@ export default {
     const db = makeDatabaseClient(env);
     const slack = makeSlackClient(env);
     const supabase = makeSupabaseClient(env);
+    const github = makeGithubClient(env);
 
     try {
       let response;
       if (request.method === 'GET') {
         response = await routeGet(request, db, env);
       } else if (request.method === 'POST') {
-        response = await routePost(request, db, slack, supabase, env);
+        response = await routePost(request, db, slack, supabase, env, github, env.AI);
       } else {
         response = jsonResponse({ success: false, message: `Unsupported method: ${request.method}` });
       }
@@ -201,7 +218,7 @@ async function routeGet(request, db, env) {
   return jsonResponse({ success: false, message: `Unknown or missing GET action: "${action}"` });
 }
 
-async function routePost(request, db, slack, supabase, env) {
+async function routePost(request, db, slack, supabase, env, github, ai) {
   let payload;
   try {
     payload = await request.json();
@@ -216,7 +233,7 @@ async function routePost(request, db, slack, supabase, env) {
   if (ADMIN_ACTIONS.has(action)) {
     const authResult = await requireStaff(request, env, supabase);
     if (authResult.error) return authResult.error;
-    return routeAdminAction(action, payload, supabase, authResult.staff);
+    return routeAdminAction(action, payload, supabase, authResult.staff, github, ai);
   }
 
   // Every other POST action here is service-to-service and requires
