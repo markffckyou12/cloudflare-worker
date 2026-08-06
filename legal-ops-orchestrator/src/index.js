@@ -20,6 +20,8 @@ import {
   handleSendAck,
   handleSendProgress,
   handleListMatters,
+  handleUpdateMatter,
+  handleDeleteMatter,
   handleListLeads,
   handleListStaff,
   handleAddStaff,
@@ -32,7 +34,11 @@ import {
   handleUpdateProjectType,
   handleDeleteProjectType,
   handlePreviewRefNo,
-  handleCreateMatter
+  handleCreateMatter,
+  handleListConfigTaskTemplates,
+  handleAddConfigTaskTemplate,
+  handleUpdateConfigTaskTemplate,
+  handleDeleteConfigTaskTemplate
 } from './handlers.js';
 
 // Admin UI actions authenticate a human staff member via a Supabase Auth
@@ -44,7 +50,9 @@ const ADMIN_ACTIONS = new Set([
   // Phase 4: staff management
   'listStaff', 'addStaff', 'updateStaff', 'setStaffStatus', 'deleteStaff', 'whoAmI',
   // Phase 5/6: project config + direct matter creation
-  'listProjectTypes', 'addProjectType', 'updateProjectType', 'deleteProjectType', 'previewRefNo', 'createMatter'
+  'listProjectTypes', 'addProjectType', 'updateProjectType', 'deleteProjectType', 'previewRefNo', 'createMatter',
+  // Phase 8: matter edit/delete + task blueprint config
+  'updateMatter', 'deleteMatter', 'listConfigTaskTemplates', 'addConfigTaskTemplate', 'updateConfigTaskTemplate', 'deleteConfigTaskTemplate'
 ]);
 
 async function requireStaff(request, env, supabase) {
@@ -89,6 +97,13 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'deleteProjectType') return handleDeleteProjectType(payload, supabase, staff);
   if (action === 'previewRefNo') return handlePreviewRefNo(payload, supabase);
   if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff);
+  // Phase 8
+  if (action === 'updateMatter') return handleUpdateMatter(payload, supabase, staff);
+  if (action === 'deleteMatter') return handleDeleteMatter(payload, supabase, staff);
+  if (action === 'listConfigTaskTemplates') return handleListConfigTaskTemplates(payload, supabase);
+  if (action === 'addConfigTaskTemplate') return handleAddConfigTaskTemplate(payload, supabase, staff);
+  if (action === 'updateConfigTaskTemplate') return handleUpdateConfigTaskTemplate(payload, supabase, staff);
+  if (action === 'deleteConfigTaskTemplate') return handleDeleteConfigTaskTemplate(payload, supabase, staff);
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
 }
 
