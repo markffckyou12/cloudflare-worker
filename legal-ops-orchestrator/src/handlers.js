@@ -631,6 +631,13 @@ export async function handleAddMasterComment(payload, supabase, staff) {
     return jsonResponse({ success: false, message: 'Missing required fields: matterId, commentText.' });
   }
 
+  if (payload.taskId) {
+    const belongs = await supabase.taskBelongsToMatter(payload.taskId, payload.matterId);
+    if (!belongs) {
+      return jsonResponse({ success: false, message: `Task ${payload.taskId} does not belong to this matter — refusing to write a mismatched comment. Refresh and try again.` });
+    }
+  }
+
   const result = await supabase.insertMasterComment({
     matter_id: payload.matterId,
     task_id: payload.taskId || null,
