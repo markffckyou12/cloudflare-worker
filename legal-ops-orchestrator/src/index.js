@@ -23,6 +23,15 @@ import {
   handleUpdateMatter,
   handleDeleteMatter,
   handleListLeads,
+  handleAddLead,
+  handleSkipLead,
+  handleListMasterTasks,
+  handleAddMasterTask,
+  handleUpdateMasterTask,
+  handleDeleteMasterTask,
+  handleListMasterComments,
+  handleAddMasterComment,
+  handleDeleteMasterComment,
   handleListStaff,
   handleAddStaff,
   handleUpdateStaff,
@@ -52,7 +61,11 @@ const ADMIN_ACTIONS = new Set([
   // Phase 5/6: project config + direct matter creation
   'listProjectTypes', 'addProjectType', 'updateProjectType', 'deleteProjectType', 'previewRefNo', 'createMatter',
   // Phase 8: matter edit/delete + task blueprint config
-  'updateMatter', 'deleteMatter', 'listConfigTaskTemplates', 'addConfigTaskTemplate', 'updateConfigTaskTemplate', 'deleteConfigTaskTemplate'
+  'updateMatter', 'deleteMatter', 'listConfigTaskTemplates', 'addConfigTaskTemplate', 'updateConfigTaskTemplate', 'deleteConfigTaskTemplate',
+  // Phase 9: tasks, comments, manual/skip leads
+  'addLead', 'skipLead',
+  'listMasterTasks', 'addMasterTask', 'updateMasterTask', 'deleteMasterTask',
+  'listMasterComments', 'addMasterComment', 'deleteMasterComment'
 ]);
 
 async function requireStaff(request, env, supabase) {
@@ -104,6 +117,16 @@ async function routeAdminAction(action, payload, supabase, staff) {
   if (action === 'addConfigTaskTemplate') return handleAddConfigTaskTemplate(payload, supabase, staff);
   if (action === 'updateConfigTaskTemplate') return handleUpdateConfigTaskTemplate(payload, supabase, staff);
   if (action === 'deleteConfigTaskTemplate') return handleDeleteConfigTaskTemplate(payload, supabase, staff);
+  // Phase 9
+  if (action === 'addLead') return handleAddLead(payload, supabase, staff);
+  if (action === 'skipLead') return handleSkipLead(payload, supabase, staff);
+  if (action === 'listMasterTasks') return handleListMasterTasks(payload, supabase);
+  if (action === 'addMasterTask') return handleAddMasterTask(payload, supabase, staff);
+  if (action === 'updateMasterTask') return handleUpdateMasterTask(payload, supabase, staff);
+  if (action === 'deleteMasterTask') return handleDeleteMasterTask(payload, supabase, staff);
+  if (action === 'listMasterComments') return handleListMasterComments(payload, supabase);
+  if (action === 'addMasterComment') return handleAddMasterComment(payload, supabase, staff);
+  if (action === 'deleteMasterComment') return handleDeleteMasterComment(payload, supabase, staff);
   return jsonResponse({ success: false, message: `Unknown admin action: "${action}"` });
 }
 
