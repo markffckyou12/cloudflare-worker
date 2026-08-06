@@ -8,59 +8,85 @@
 
 import { jsonResponse } from './shared-http.js';
 
-export async function handleProvisionSlackWorkflow(payload, db, slack, env) {
-  if (!payload.refNo) {
-    return jsonResponse({ success: false, message: 'Missing required field: refNo.' });
-  }
-  if (!env.DATABASE_SERVICE_EXEC_URL || !env.SLACK_SERVICE_EXEC_URL) {
-    return jsonResponse({ success: false, message: 'DATABASE_SERVICE_EXEC_URL / SLACK_SERVICE_EXEC_URL not configured.' });
-  }
+/**
+ * Does the actual work: gather matter + officer context from Supabase,
+ * create the Slack channel (still via the existing slack-service proxy --
+ * that part was never broken, it only needs a channel name + Slack user
+ * IDs, nothing Sheets-specific), write the resulting channel_id/message_ts
+ * back into `matters`, and post the initial status card.
+ *
+ * Returns {success, message?, channelId?} rather than throwing, so both
+ * callers below can decide their own failure handling: the manual action
+ * surfaces the real error to the caller, automatic provisioning treats
+ * the same failure as best-effort and logs it instead.
+ */
+async function provisionSlackForMatter(supabase, slack, matterId) {
+  const matter = await supabase.getMatterForSlackProvisioning(matterId);
+  if (!matter) return { success: false, message: `Matter id ${matterId} not found.` };
 
-  const contextResult = await db.getMatterContext(payload.refNo);
-  if (!contextResult.success) {
-    return jsonResponse({ success: false, message: `Could not fetch matter context: ${contextResult.message}` });
-  }
-  const context = contextResult.data;
+  const { resolved: officerSlackIds, unresolved: unresolvedOfficers } = await supabase.getMatterOfficersForSlack(matterId);
 
-  const channelName = `${payload.refNo}-${context.clientName || ''}`;
+  const channelName = `${matter.ref_no}-${matter.client_name || ''}`;
   const createResult = await slack.createChannel(
     channelName,
     true,
-    context.officerSlackIdsArray || [],
-    (context.unresolvedOfficers || []).map(o => (o.name ? `${o.name} (${o.initial})` : o.initial)),
-    payload.refNo
+    officerSlackIds,
+    unresolvedOfficers.map((o) => (o.name ? `${o.name} (${o.initial})` : o.initial)),
+    matter.ref_no
   );
   if (!createResult.success) {
-    return jsonResponse({ success: false, message: `Slack channel provisioning failed: ${createResult.message}` });
+    return { success: false, message: `Slack channel provisioning failed: ${createResult.message}` };
   }
 
-  const linkResult = await db.updateSlackLinks(payload.refNo, createResult.channelId, createResult.messageTs || null);
+  await supabase.updateMatter(matterId, {
+    slack_channel_id: createResult.channelId,
+    slack_message_ts: createResult.messageTs || null
+  });
 
   if (createResult.messageTs) {
-    const officerParts = (context.officerSlackIdsArray || []).map(id => `<@${id}>`);
-    (context.unresolvedOfficers || []).forEach(o => {
+    const officerParts = officerSlackIds.map((id) => `<@${id}>`);
+    unresolvedOfficers.forEach((o) => {
       officerParts.push(`⚠️ ${o.name || o.initial} (no linked Slack account)`);
     });
     await slack.updateMatterCard(
       createResult.channelId,
       createResult.messageTs,
-      payload.refNo,
-      context.clientName,
-      context.projectType,
-      context.percentage,
+      matter.ref_no,
+      matter.client_name,
+      matter.project_types?.name,
+      matter.progress_pct,
       officerParts.length > 0 ? officerParts.join(', ') : '_unassigned_',
-      'Active'
+      matter.status
     );
   }
 
-  return jsonResponse({
-    success: true,
-    refNo: payload.refNo,
-    channelId: createResult.channelId,
-    linkedBack: !!linkResult.success,
-    linkedBackPartial: !!linkResult.partial,
-    unresolvedOfficers: context.unresolvedOfficers || []
-  });
+  return { success: true, channelId: createResult.channelId };
+}
+
+/**
+ * Manual/service-triggered provisioning by refNo. Rewritten Phase 10 --
+ * previously called db.getMatterContext() against the legacy Sheets-
+ * backed database-service, which had no knowledge of any matter created
+ * since the Supabase migration and would fail for all of them. Now reads
+ * everything from Supabase directly. No audit_log entry here (matches
+ * handleWriteLead's convention -- this is a service-to-service action,
+ * not a staff-attributed one, so there's no staff.id to attribute it to).
+ */
+export async function handleProvisionSlackWorkflow(payload, supabase, slack, env) {
+  if (!payload.refNo) {
+    return jsonResponse({ success: false, message: 'Missing required field: refNo.' });
+  }
+  if (!env.SLACK_SERVICE_EXEC_URL) {
+    return jsonResponse({ success: false, message: 'SLACK_SERVICE_EXEC_URL not configured.' });
+  }
+
+  const matterId = await supabase.getMatterIdByRefNo(payload.refNo);
+  if (!matterId) {
+    return jsonResponse({ success: false, message: `No matter found with ref_no ${payload.refNo}.` });
+  }
+
+  const result = await provisionSlackForMatter(supabase, slack, matterId);
+  return jsonResponse({ success: result.success, message: result.message, refNo: payload.refNo, channelId: result.channelId });
 }
 
 export async function handleRefreshMatterCard(payload, db, slack, env) {
@@ -326,7 +352,7 @@ export async function handlePreviewRefNo(payload, supabase) {
  * point. It still deploys blueprints if templates DO exist, and reports
  * deployedCount either way so the caller can tell which happened.
  */
-export async function handleCreateMatter(payload, supabase, staff) {
+export async function handleCreateMatter(payload, supabase, staff, slack) {
   if (!payload.projectTypeId || !payload.clientName) {
     return jsonResponse({ success: false, message: 'Missing required fields: projectTypeId, clientName.' });
   }
@@ -346,6 +372,8 @@ export async function handleCreateMatter(payload, supabase, staff) {
   });
 
   const deployResult = await deployBlueprintsForMatter(supabase, newMatter.id, payload.projectTypeId);
+
+  await provisionSlackBestEffort(supabase, slack, newMatter.id, refNo, 'CreateMatter');
 
   await supabase.insertAuditLog({
     staffId: staff.id, action: 'create_matter', tableName: 'matters',
@@ -844,7 +872,32 @@ async function mintRefNo(supabase, projectType) {
   return `TP/${shuffleDigits(rawDigits, REF_NO_ENGINE_V2.SHUFFLE_MAP)}`;
 }
 
-async function promoteOneLead(supabase, lead) {
+/**
+ * Best-effort wrapper for automatic provisioning (as opposed to
+ * handleProvisionSlackWorkflow's manual path, which surfaces the real
+ * error to the caller). A Slack outage or missing config shouldn't block
+ * matter creation itself -- log it to system_health_logs and move on,
+ * same resilience philosophy as deployBlueprintsForMatter's 0-tasks case
+ * just above.
+ */
+async function provisionSlackBestEffort(supabase, slack, matterId, refNo, jobName) {
+  try {
+    const result = await provisionSlackForMatter(supabase, slack, matterId);
+    if (!result.success) {
+      await supabase.insertSystemHealthLog({
+        job_name: jobName, status: 'FAILURE',
+        log_details: `Matter ${refNo}: Slack provisioning failed -- ${result.message}`
+      });
+    }
+  } catch (err) {
+    await supabase.insertSystemHealthLog({
+      job_name: jobName, status: 'FAILURE',
+      log_details: `Matter ${refNo}: Slack provisioning threw -- ${err.message}`
+    });
+  }
+}
+
+async function promoteOneLead(supabase, lead, slack) {
   const templates = await supabase.getConfigTaskTemplates(lead.project_type_id);
   if (!templates || templates.length === 0) {
     throw new Error(`No config_task_templates configured for project_type_id ${lead.project_type_id} — add template rows before promoting leads of this type.`);
@@ -872,11 +925,13 @@ async function promoteOneLead(supabase, lead) {
     });
   }
 
+  await provisionSlackBestEffort(supabase, slack, newMatter.id, refNo, 'PromoteLeadToMatter');
+
   await supabase.updateLead(lead.id, { acknowledge_status: 'Converted', converted_matter_id: newMatter.id });
   return refNo;
 }
 
-export async function handlePromoteLeads(payload, supabase, staff) {
+export async function handlePromoteLeads(payload, supabase, staff, slack) {
   const candidates = await supabase.getPendingLeads();
   const promotedThisRun = {};
   const results = [];
@@ -895,7 +950,7 @@ export async function handlePromoteLeads(payload, supabase, staff) {
     }
 
     try {
-      const refNo = await promoteOneLead(supabase, lead);
+      const refNo = await promoteOneLead(supabase, lead, slack);
       promotedThisRun[dedupeKey] = lead.id;
       await supabase.insertAuditLog({
         staffId: staff.id, action: 'promote_lead', tableName: 'response_leads',
