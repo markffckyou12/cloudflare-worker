@@ -610,6 +610,96 @@ export function makeSupabaseClient(env) {
   };
 }
 
+// --- GitHub (Phase 10 — content editing). Plain Contents API fetch calls,
+// same hand-rolled-over-SDK reasoning as makeSupabaseClient above: this is
+// four actions' worth of reads/writes against one API, not enough surface
+// to justify an Octokit dependency in a Worker bundle. ---
+
+export function makeGithubClient(env) {
+  const owner = env.GITHUB_OWNER;
+  const repo = env.GITHUB_REPO;
+  const branch = env.GITHUB_BRANCH || 'main';
+  const base = `https://api.github.com/repos/${owner}/${repo}/contents`;
+
+  async function ghFetch(path, options = {}) {
+    const resp = await fetch(`${base}${path}`, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'legal-ops-orchestrator',
+        ...(options.headers || {})
+      }
+    });
+    const body = await resp.json().catch(() => null);
+    return { ok: resp.ok, status: resp.status, body };
+  }
+
+  // Content is UTF-8; Workers' atob/btoa are Latin1-only, so route through
+  // TextEncoder/Decoder to avoid mangling non-ASCII text (e.g. Bahasa
+  // Malaysia diacritics in a future post) on the way to/from base64.
+  function encodeContent(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    bytes.forEach((b) => { binary += String.fromCharCode(b); });
+    return btoa(binary);
+  }
+  function decodeContent(b64) {
+    const binary = atob(b64.replace(/\n/g, ''));
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  }
+
+  return {
+    /** Files only (skips subdirectories), .md only. 404 on a missing dir is
+     *  treated as "no posts yet" rather than an error -- same idea as
+     *  insertLead treating a 23505 as a successful no-op above: an
+     *  expected empty case, not exceptional. */
+    async listDir(dirPath) {
+      const { ok, status, body } = await ghFetch(`/${dirPath}?ref=${branch}`);
+      if (!ok) {
+        if (status === 404) return [];
+        throw new Error(`GitHub listDir failed (${status}): ${JSON.stringify(body)}`);
+      }
+      return (Array.isArray(body) ? body : []).filter((item) => item.type === 'file' && item.name.endsWith('.md'));
+    },
+
+    /** Returns { sha, content } or null if the file doesn't exist. The sha
+     *  is required by putFile/deleteFile to update/remove an existing
+     *  file -- GitHub's Contents API rejects a write without it as a
+     *  conflict, same spirit as PostgREST's optimistic-concurrency use
+     *  elsewhere in this file. */
+    async getFile(filePath) {
+      const { ok, status, body } = await ghFetch(`/${filePath}?ref=${branch}`);
+      if (!ok) {
+        if (status === 404) return null;
+        throw new Error(`GitHub getFile failed (${status}): ${JSON.stringify(body)}`);
+      }
+      return { sha: body.sha, content: decodeContent(body.content) };
+    },
+
+    /** Creates (no sha) or updates (sha required) a file in one commit. */
+    async putFile(filePath, content, message, sha) {
+      const { ok, status, body } = await ghFetch(`/${filePath}`, {
+        method: 'PUT',
+        body: JSON.stringify({ message, content: encodeContent(content), branch, ...(sha ? { sha } : {}) })
+      });
+      if (!ok) throw new Error(`GitHub putFile failed (${status}): ${JSON.stringify(body)}`);
+      return body;
+    },
+
+    async deleteFile(filePath, sha, message) {
+      const { ok, status, body } = await ghFetch(`/${filePath}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ message, sha, branch })
+      });
+      if (!ok) throw new Error(`GitHub deleteFile failed (${status}): ${JSON.stringify(body)}`);
+      return body;
+    }
+  };
+}
+
 // --- Staff JWT verification (Phase 3 admin UI) ---
 //
 // Tries Supabase's JWKS endpoint first (modern asymmetric-signing-key
