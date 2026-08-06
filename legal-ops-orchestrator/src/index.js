@@ -97,9 +97,9 @@ async function requireStaff(request, env, supabase) {
   return { staff };
 }
 
-async function routeAdminAction(action, payload, supabase, staff, github, ai) {
+async function routeAdminAction(action, payload, supabase, staff, slack, github, ai) {
   if (action === 'deployBlueprints') return handleDeployBlueprints(payload, supabase, staff);
-  if (action === 'promoteLeads') return handlePromoteLeads(payload, supabase, staff);
+  if (action === 'promoteLeads') return handlePromoteLeads(payload, supabase, staff, slack);
   if (action === 'decodeRef') return handleDecodeRef(payload, supabase);
   if (action === 'sendAck') return handleSendAck(payload, supabase, staff);
   if (action === 'sendProgress') return handleSendProgress(payload, supabase, staff);
@@ -118,7 +118,7 @@ async function routeAdminAction(action, payload, supabase, staff, github, ai) {
   if (action === 'updateProjectType') return handleUpdateProjectType(payload, supabase, staff);
   if (action === 'deleteProjectType') return handleDeleteProjectType(payload, supabase, staff);
   if (action === 'previewRefNo') return handlePreviewRefNo(payload, supabase);
-  if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff);
+  if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff, slack);
   // Phase 8
   if (action === 'updateMatter') return handleUpdateMatter(payload, supabase, staff);
   if (action === 'deleteMatter') return handleDeleteMatter(payload, supabase, staff);
@@ -233,7 +233,7 @@ async function routePost(request, db, slack, supabase, env, github, ai) {
   if (ADMIN_ACTIONS.has(action)) {
     const authResult = await requireStaff(request, env, supabase);
     if (authResult.error) return authResult.error;
-    return routeAdminAction(action, payload, supabase, authResult.staff, github, ai);
+    return routeAdminAction(action, payload, supabase, authResult.staff, slack, github, ai);
   }
 
   // Every other POST action here is service-to-service and requires
@@ -245,7 +245,7 @@ async function routePost(request, db, slack, supabase, env, github, ai) {
   }
 
   if (action === 'provisionSlackWorkflow') {
-    return handleProvisionSlackWorkflow(payload, db, slack, env);
+    return handleProvisionSlackWorkflow(payload, supabase, slack, env);
   }
 
   if (action === 'refreshMatterCard') {
