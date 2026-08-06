@@ -360,6 +360,135 @@ export async function handleListMatters(payload, supabase) {
   return jsonResponse({ success: true, matters });
 }
 
+/**
+ * Combines a matter field patch with an officer-list replace in one
+ * action, since they're edited together on the same form. `officerStaffIds`
+ * is optional -- omit it entirely to leave officer assignments untouched
+ * while patching other fields; pass `[]` explicitly to clear all officers.
+ */
+export async function handleUpdateMatter(payload, supabase, staff) {
+  if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
+
+  const fields = {};
+  if (payload.clientName !== undefined) fields.client_name = payload.clientName;
+  if (payload.clientEmail !== undefined) fields.client_email = payload.clientEmail;
+  if (payload.status !== undefined) fields.status = payload.status;
+  if (payload.progressPct !== undefined) fields.progress_pct = payload.progressPct;
+  if (payload.driveFolderUrl !== undefined) fields.drive_folder_url = payload.driveFolderUrl;
+  if (payload.slackChannelId !== undefined) fields.slack_channel_id = payload.slackChannelId;
+
+  if (Object.keys(fields).length > 0) {
+    const result = await supabase.updateMatter(payload.matterId, fields);
+    if (!result.success) return jsonResponse({ success: false, message: result.message });
+  }
+
+  if (payload.officerStaffIds !== undefined) {
+    try {
+      await supabase.setMatterOfficers(payload.matterId, payload.officerStaffIds);
+    } catch (err) {
+      return jsonResponse({ success: false, message: `Matter fields saved, but officer assignment failed: ${err.message}` });
+    }
+  }
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'update_matter', tableName: 'matters',
+    recordId: payload.matterId, detail: { ...fields, officerStaffIds: payload.officerStaffIds }
+  });
+
+  return jsonResponse({ success: true });
+}
+
+/**
+ * Hard delete. Expected to fail for any matter with real activity
+ * against it (tasks, comments, officers, a linked lead) -- see
+ * clients.js's deleteMatter. In practice this mainly exists to clean up
+ * test matters created while trying out previewRefNo/createMatter.
+ */
+export async function handleDeleteMatter(payload, supabase, staff) {
+  if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
+
+  const result = await supabase.deleteMatter(payload.matterId);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_matter', tableName: 'matters', recordId: payload.matterId
+  });
+
+  return jsonResponse({ success: true });
+}
+
+// --- Task blueprint config (Phase 8) ---
+
+export async function handleListConfigTaskTemplates(payload, supabase) {
+  if (!payload.projectTypeId) return jsonResponse({ success: false, message: 'Missing required field: projectTypeId.' });
+  const templates = await supabase.listConfigTaskTemplatesFor(payload.projectTypeId);
+  return jsonResponse({ success: true, templates });
+}
+
+export async function handleAddConfigTaskTemplate(payload, supabase, staff) {
+  if (!payload.projectTypeId || !payload.title || payload.sequence === undefined) {
+    return jsonResponse({ success: false, message: 'Missing required fields: projectTypeId, title, sequence.' });
+  }
+  const sequence = Number(payload.sequence);
+  if (!Number.isInteger(sequence) || sequence < 1) {
+    return jsonResponse({ success: false, message: 'sequence must be a positive integer -- it controls task order within the blueprint.' });
+  }
+
+  const result = await supabase.insertConfigTaskTemplate({
+    project_type_id: payload.projectTypeId,
+    title: payload.title,
+    sequence,
+    default_assigned_staff_id: payload.defaultAssignedStaffId || null
+  });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'add_task_template', tableName: 'config_task_templates',
+    recordId: result.data.id, detail: { projectTypeId: payload.projectTypeId, title: payload.title, sequence }
+  });
+
+  return jsonResponse({ success: true, template: result.data });
+}
+
+export async function handleUpdateConfigTaskTemplate(payload, supabase, staff) {
+  if (!payload.templateId) return jsonResponse({ success: false, message: 'Missing required field: templateId.' });
+
+  const fields = {};
+  if (payload.title !== undefined) fields.title = payload.title;
+  if (payload.sequence !== undefined) {
+    const sequence = Number(payload.sequence);
+    if (!Number.isInteger(sequence) || sequence < 1) {
+      return jsonResponse({ success: false, message: 'sequence must be a positive integer.' });
+    }
+    fields.sequence = sequence;
+  }
+  if (payload.defaultAssignedStaffId !== undefined) fields.default_assigned_staff_id = payload.defaultAssignedStaffId;
+  if (Object.keys(fields).length === 0) return jsonResponse({ success: false, message: 'No editable fields provided.' });
+
+  const result = await supabase.updateConfigTaskTemplate(payload.templateId, fields);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'update_task_template', tableName: 'config_task_templates',
+    recordId: payload.templateId, detail: fields
+  });
+
+  return jsonResponse({ success: true, template: result.data });
+}
+
+export async function handleDeleteConfigTaskTemplate(payload, supabase, staff) {
+  if (!payload.templateId) return jsonResponse({ success: false, message: 'Missing required field: templateId.' });
+
+  const result = await supabase.deleteConfigTaskTemplate(payload.templateId);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_task_template', tableName: 'config_task_templates', recordId: payload.templateId
+  });
+
+  return jsonResponse({ success: true });
+}
+
 export async function handleListLeads(payload, supabase) {
   const leads = await supabase.listLeads();
   return jsonResponse({ success: true, leads });
