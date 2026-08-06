@@ -493,6 +493,16 @@ export function makeSupabaseClient(env) {
 
     // --- Master comments (Phase 9) ---
 
+    /** Mirrors the original Apps Script writeComment's defense: a stale
+     *  task selection (task reassigned/deleted between the form loading
+     *  and submitting) shouldn't silently attach a comment to the wrong
+     *  matter's task. */
+    async taskBelongsToMatter(taskId, matterId) {
+      const { ok, body } = await pgFetch(`/master_tasks?id=eq.${taskId}&matter_id=eq.${matterId}&select=id`);
+      if (!ok) throw new Error(`Failed to verify task ownership: ${JSON.stringify(body)}`);
+      return Array.isArray(body) && body.length > 0;
+    },
+
     async listMasterCommentsFor(matterId) {
       const { ok, body } = await pgFetch(
         `/master_comments?matter_id=eq.${matterId}&select=id,author,comment_text,comment_status,created_at,task_id&order=created_at.desc`
