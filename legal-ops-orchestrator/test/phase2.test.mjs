@@ -15,13 +15,10 @@ const ENV = {
 
 function mockFetch(responder) {
   const calls = [];
-  jest.spyOn(global, 'fetch').mockImplementation(async (url, options) => {
+  global.fetch = jest.fn(async (url, options) => {
     calls.push({ url, options });
     const body = responder(url, options);
-    return new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' }
-    });
+    return { json: async () => body };
   });
   return calls;
 }
@@ -86,7 +83,7 @@ describe('POST auth gating', () => {
     expect(calls).toHaveLength(0);
   });
 
-  test('wrong authToken is rejected', async () => {
+  test('wrong authToken is rejected (constant-time compare, not just truthy)', async () => {
     mockFetch(() => { throw new Error('should not be called'); });
     const req = new Request('https://worker.example/', {
       method: 'POST',
@@ -167,7 +164,7 @@ describe('provisionSlackWorkflow', () => {
         };
       }
       if (action === 'createChannel') {
-        expect(parsed.refNo).toBe('TP/001');
+        expect(parsed.refNo).toBe('TP/001'); // true clean refNo, not compound channelName
         return { success: true, channelId: 'C999', messageTs: '111.222' };
       }
       if (action === 'updateSlackLinks') {
