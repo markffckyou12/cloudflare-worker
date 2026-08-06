@@ -494,6 +494,174 @@ export async function handleListLeads(payload, supabase) {
   return jsonResponse({ success: true, leads });
 }
 
+/** Manual lead entry for leads that didn't come through email intake
+ *  (writeLead) -- phone calls, walk-ins, etc. Goes through the same
+ *  'Pending' -> promoteLeads/skipLead lifecycle as email-sourced leads. */
+export async function handleAddLead(payload, supabase, staff) {
+  if (!payload.leadName || !payload.leadEmail) {
+    return jsonResponse({ success: false, message: 'Missing required fields: leadName, leadEmail.' });
+  }
+
+  const result = await supabase.insertLeadManual({
+    lead_name: payload.leadName,
+    lead_email: payload.leadEmail,
+    lead_phone: payload.leadPhone || null,
+    inquiry_notes: payload.inquiryNotes || null,
+    project_type_id: payload.projectTypeId || null
+  });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'add_lead_manual', tableName: 'response_leads',
+    recordId: result.data.id, detail: { leadName: payload.leadName, leadEmail: payload.leadEmail }
+  });
+
+  return jsonResponse({ success: true, lead: result.data });
+}
+
+/** Marks a single lead 'Skipped' without promoting it -- distinct from
+ *  promoteLeads' own automatic duplicate-skip logic (see promoteOneLead's
+ *  caller), this is a manual "we're not pursuing this one" action. */
+export async function handleSkipLead(payload, supabase, staff) {
+  if (!payload.leadId) return jsonResponse({ success: false, message: 'Missing required field: leadId.' });
+
+  await supabase.updateLead(payload.leadId, { acknowledge_status: 'Skipped' });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'skip_lead_manual', tableName: 'response_leads', recordId: payload.leadId
+  });
+
+  return jsonResponse({ success: true });
+}
+
+// --- Master tasks (Phase 9) ---
+
+export async function handleListMasterTasks(payload, supabase) {
+  if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
+  const tasks = await supabase.listMasterTasksFor(payload.matterId);
+  return jsonResponse({ success: true, tasks });
+}
+
+export async function handleAddMasterTask(payload, supabase, staff) {
+  if (!payload.matterId || !payload.title || payload.sequence === undefined) {
+    return jsonResponse({ success: false, message: 'Missing required fields: matterId, title, sequence.' });
+  }
+  const sequence = Number(payload.sequence);
+  if (!Number.isInteger(sequence) || sequence < 1) {
+    return jsonResponse({ success: false, message: 'sequence must be a positive integer.' });
+  }
+
+  const result = await supabase.insertMasterTask({
+    matter_id: payload.matterId,
+    title: payload.title,
+    sequence,
+    is_completed: false,
+    assigned_staff_id: payload.assignedStaffId || null
+  });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'add_master_task', tableName: 'master_tasks',
+    recordId: result.data.id, detail: { matterId: payload.matterId, title: payload.title }
+  });
+
+  return jsonResponse({ success: true, task: result.data });
+}
+
+/**
+ * Toggling isCompleted also sets/clears completion_date automatically
+ * (today's date when marking complete, null when un-completing) --
+ * matches what the deployed-blueprint tasks would get from the original
+ * Apps Script flow, so admin-toggled tasks behave the same as
+ * system-completed ones rather than needing a separate manual date entry.
+ */
+export async function handleUpdateMasterTask(payload, supabase, staff) {
+  if (!payload.taskId) return jsonResponse({ success: false, message: 'Missing required field: taskId.' });
+
+  const fields = {};
+  if (payload.title !== undefined) fields.title = payload.title;
+  if (payload.sequence !== undefined) {
+    const sequence = Number(payload.sequence);
+    if (!Number.isInteger(sequence) || sequence < 1) {
+      return jsonResponse({ success: false, message: 'sequence must be a positive integer.' });
+    }
+    fields.sequence = sequence;
+  }
+  if (payload.assignedStaffId !== undefined) fields.assigned_staff_id = payload.assignedStaffId;
+  if (payload.isCompleted !== undefined) {
+    fields.is_completed = !!payload.isCompleted;
+    fields.completion_date = payload.isCompleted ? new Date().toISOString() : null;
+  }
+  if (Object.keys(fields).length === 0) return jsonResponse({ success: false, message: 'No editable fields provided.' });
+
+  const result = await supabase.updateMasterTask(payload.taskId, fields);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'update_master_task', tableName: 'master_tasks',
+    recordId: payload.taskId, detail: fields
+  });
+
+  return jsonResponse({ success: true, task: result.data });
+}
+
+export async function handleDeleteMasterTask(payload, supabase, staff) {
+  if (!payload.taskId) return jsonResponse({ success: false, message: 'Missing required field: taskId.' });
+
+  const result = await supabase.deleteMasterTask(payload.taskId);
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_master_task', tableName: 'master_tasks', recordId: payload.taskId
+  });
+
+  return jsonResponse({ success: true });
+}
+
+// --- Master comments (Phase 9) ---
+
+export async function handleListMasterComments(payload, supabase) {
+  if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
+  const comments = await supabase.listMasterCommentsFor(payload.matterId);
+  return jsonResponse({ success: true, comments });
+}
+
+export async function handleAddMasterComment(payload, supabase, staff) {
+  if (!payload.matterId || !payload.commentText) {
+    return jsonResponse({ success: false, message: 'Missing required fields: matterId, commentText.' });
+  }
+
+  const result = await supabase.insertMasterComment({
+    matter_id: payload.matterId,
+    task_id: payload.taskId || null,
+    author: staff.name,
+    comment_text: payload.commentText,
+    comment_status: 'Active'
+  });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'add_master_comment', tableName: 'master_comments', recordId: result.data.id
+  });
+
+  return jsonResponse({ success: true, comment: result.data });
+}
+
+/** Soft delete only -- sets comment_status='Deleted' rather than a real
+ *  DELETE. There's deliberately no hard-delete action for comments. */
+export async function handleDeleteMasterComment(payload, supabase, staff) {
+  if (!payload.commentId) return jsonResponse({ success: false, message: 'Missing required field: commentId.' });
+
+  const result = await supabase.updateMasterComment(payload.commentId, { comment_status: 'Deleted' });
+  if (!result.success) return jsonResponse({ success: false, message: result.message });
+
+  await supabase.insertAuditLog({
+    staffId: staff.id, action: 'delete_master_comment', tableName: 'master_comments', recordId: payload.commentId
+  });
+
+  return jsonResponse({ success: true });
+}
+
 // --- Staff management (Phase 4) ---
 
 export async function handleListStaff(payload, supabase) {
