@@ -215,9 +215,15 @@ export function makeSupabaseClient(env) {
     },
 
     /** Recent leads for the admin UI's browsable list (all statuses, not just Pending). */
+    /** response_leads has TWO FKs to project_types (project_type_id and
+     *  ai_suggested_project_type_id -- the latter apparently from some AI
+     *  lead-classification feature that predates this migration and was
+     *  never mentioned in any handoff doc), so the embed below MUST use
+     *  the explicit FK constraint name or PostgREST throws PGRST201
+     *  ("more than one relationship was found") rather than picking one. */
     async listLeads(limit = 50) {
       const { ok, body } = await pgFetch(
-        `/response_leads?select=id,lead_name,lead_email,lead_phone,inquiry_notes,acknowledge_status,project_type_id,project_types(name),converted_matter_id,matters!response_leads_converted_matter_id_fkey(ref_no),created_at&order=created_at.desc&limit=${limit}`
+        `/response_leads?select=id,lead_name,lead_email,lead_phone,inquiry_notes,acknowledge_status,project_type_id,project_types!response_leads_project_type_id_fkey(name),converted_matter_id,matters!response_leads_converted_matter_id_fkey(ref_no),created_at&order=created_at.desc&limit=${limit}`
       );
       if (!ok) throw new Error(`Failed to list leads: ${JSON.stringify(body)}`);
       return body || [];
