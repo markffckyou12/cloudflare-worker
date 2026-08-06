@@ -1152,7 +1152,7 @@ export async function handleDeletePost(payload, github, supabase, staff) {
 //     legal claim is a real reputational risk, not a hypothetical one.
 // =========================================================================
 
-const REVIEW_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+const REVIEW_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast";
 
 /** Suggests a publish date at least MIN_GAP_DAYS after the most recently
  *  scheduled/published post, using the average gap between the last few
