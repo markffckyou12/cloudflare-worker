@@ -158,9 +158,57 @@ export function makeSupabaseClient(env) {
 
     /** Recent matters for the admin UI's browsable list (not just pending/actionable ones). */
     async listMatters(limit = 50) {
-      const { ok, body } = await pgFetch(`/matters?select=id,ref_no,client_name,status,progress_pct,project_type_id&order=created_at.desc&limit=${limit}`);
+      const { ok, body } = await pgFetch(
+        `/matters?select=id,ref_no,client_name,client_email,status,progress_pct,drive_folder_url,slack_channel_id,project_type_id,project_types(name),matter_officers(staff_id)&order=created_at.desc&limit=${limit}`
+      );
       if (!ok) throw new Error(`Failed to list matters: ${JSON.stringify(body)}`);
       return body || [];
+    },
+
+    /** Partial patch -- absent field = unchanged, same convention as
+     *  updateStaff/updateProjectType. ref_no is deliberately never
+     *  editable through this (or anywhere) -- it's cryptographically
+     *  tied to the REF_NO_ENGINE checksum and ref_no_counters sequence;
+     *  changing it after the fact would desync both. */
+    async updateMatter(matterId, fields) {
+      const { ok, status, body } = await pgFetch(`/matters?id=eq.${matterId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      if (!Array.isArray(body) || body.length === 0) return { success: false, message: `Matter id ${matterId} not found.` };
+      return { success: true, data: body[0] };
+    },
+
+    /** Full replace, not a diff -- deletes all existing matter_officers
+     *  rows for this matter and inserts the new set. Simpler and safer
+     *  than computing an add/remove delta, and this is a low-frequency
+     *  admin action (not a hot path), so the extra round trip doesn't
+     *  matter. */
+    async setMatterOfficers(matterId, staffIds) {
+      const del = await pgFetch(`/matter_officers?matter_id=eq.${matterId}`, { method: 'DELETE' });
+      if (!del.ok) throw new Error(`Failed to clear matter_officers: ${JSON.stringify(del.body)}`);
+      if (!staffIds || staffIds.length === 0) return;
+      const rows = staffIds.map((staffId) => ({ matter_id: matterId, staff_id: staffId }));
+      const ins = await pgFetch('/matter_officers', { method: 'POST', body: JSON.stringify(rows) });
+      if (!ins.ok) throw new Error(`Failed to set matter_officers: ${JSON.stringify(ins.body)}`);
+    },
+
+    /** `matter_officers`, `master_tasks`, `master_comments` all FK to
+     *  matters.id, and `response_leads.converted_matter_id` does too --
+     *  expect 23503 for any matter that actually has real activity
+     *  against it. In practice this will mostly succeed only for a
+     *  freshly-created matter with no tasks/comments/officers yet. */
+    async deleteMatter(matterId) {
+      const { ok, status, body } = await pgFetch(`/matters?id=eq.${matterId}`, { method: 'DELETE' });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23503') {
+          return { success: false, message: 'Cannot delete: this matter has tasks, comments, officers, or a linked lead referencing it.' };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      return { success: true };
     },
 
     /** Recent leads for the admin UI's browsable list (all statuses, not just Pending). */
@@ -174,6 +222,56 @@ export function makeSupabaseClient(env) {
       const { ok, body } = await pgFetch(`/config_task_templates?project_type_id=eq.${projectTypeId}&select=title,sequence,default_assigned_staff_id&order=sequence`);
       if (!ok) throw new Error(`Failed to read config_task_templates: ${JSON.stringify(body)}`);
       return body || [];
+    },
+
+    // --- Task blueprint config (Phase 8) ---
+    // Distinct from getConfigTaskTemplates above (which deployBlueprintsForMatter
+    // uses internally, minimal fields only) -- these are for the admin UI's
+    // full CRUD, with the staff name embedded for display.
+
+    async listConfigTaskTemplatesFor(projectTypeId) {
+      const { ok, body } = await pgFetch(
+        `/config_task_templates?project_type_id=eq.${projectTypeId}&select=id,title,sequence,default_assigned_staff_id,staff(name,initial)&order=sequence`
+      );
+      if (!ok) throw new Error(`Failed to list config_task_templates: ${JSON.stringify(body)}`);
+      return body || [];
+    },
+
+    async insertConfigTaskTemplate(fields) {
+      const { ok, status, body } = await pgFetch('/config_task_templates', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      return { success: true, data: Array.isArray(body) ? body[0] : body };
+    },
+
+    async updateConfigTaskTemplate(templateId, fields) {
+      const { ok, status, body } = await pgFetch(`/config_task_templates?id=eq.${templateId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(fields)
+      });
+      if (!ok) return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      if (!Array.isArray(body) || body.length === 0) return { success: false, message: `Template id ${templateId} not found.` };
+      return { success: true, data: body[0] };
+    },
+
+    /** No known FK references INTO config_task_templates from any other
+     *  table (deployBlueprintsForMatter copies fields into new master_tasks
+     *  rows rather than linking back), so this is expected to always
+     *  succeed rather than needing 23503 handling -- kept anyway for
+     *  defense in depth in case that ever changes. */
+    async deleteConfigTaskTemplate(templateId) {
+      const { ok, status, body } = await pgFetch(`/config_task_templates?id=eq.${templateId}`, { method: 'DELETE' });
+      if (!ok) {
+        if (status === 409 && body && body.code === '23503') {
+          return { success: false, message: 'Cannot delete: this template is still referenced elsewhere.' };
+        }
+        return { success: false, message: (body && (body.message || body.hint)) || `PostgREST error ${status}` };
+      }
+      return { success: true };
     },
 
     async insertMasterTasks(rows) {
