@@ -5,8 +5,18 @@
 // exercises the routing/handlers directly.
 
 import { jest } from '@jest/globals';
+import { webcrypto } from 'node:crypto';
 import { SignJWT } from 'jose';
 import worker from '../src/index.js';
+
+// jose (used below to sign test JWTs, and by src/clients.js's
+// verifyStaffJwt at runtime) needs the Web Crypto API. The real
+// Cloudflare Workers runtime this code actually runs in has `crypto` as
+// a standard global -- Node's Jest environment doesn't, by default. This
+// is a test-environment-only polyfill, not a production concern.
+if (!globalThis.crypto) {
+  globalThis.crypto = webcrypto;
+}
 
 const ENV = {
   DATABASE_SERVICE_EXEC_URL: 'https://script.google.com/macros/s/db-service/exec',
