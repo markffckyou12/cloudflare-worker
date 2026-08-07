@@ -1,6 +1,6 @@
 name = "legal-ops-orchestrator"
 main = "src/index.js"
-compatibility_date = "2026-07-01"
+compatibility_date = "2026-07-08"
 
 # Non-secret: the deployed /exec URLs of the two Apps Script services this
 # Worker still calls into (database-service and slack-service are staying
@@ -8,6 +8,9 @@ compatibility_date = "2026-07-01"
 [vars]
 DATABASE_SERVICE_EXEC_URL = "https://script.google.com/macros/s/AKfycbxEliLvB5PpdUtX_G-NJurhHImeQzbg0hopqJMwkVABKhP9TXfQarHsQceYfD_N_SxmXQ/exec"
 SLACK_SERVICE_EXEC_URL = "https://script.google.com/macros/s/AKfycbxaDHRScoXLTU_D9nJRzTpObR9NsYWaleVZdY1eGzl7dSOiI8WsN04Hm679C8U6AEug/exec"
+GITHUB_REPO = "legalgan"
+GITHUB_OWNER = "markffckyou12"
+GITHUB_BRANCH = "main"
 
 # Secret — DO NOT put the real value here. Before deploying, pull the
 # EXISTING value from orchestrator-service's Script Properties (Project
