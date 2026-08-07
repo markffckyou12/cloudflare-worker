@@ -395,6 +395,46 @@ export function makeSupabaseClient(env) {
       return { success: true };
     },
 
+    async getMatterIdByRefNo(refNo) {
+      const { ok, body } = await pgFetch(`/matters?ref_no=eq.${encodeURIComponent(refNo)}&select=id`);
+      if (!ok) throw new Error(`Failed to look up matter by ref_no: ${JSON.stringify(body)}`);
+      return Array.isArray(body) && body.length > 0 ? body[0].id : null;
+    },
+
+    // --- Slack provisioning context (Phase 10 -- legal-ops-orchestrator's
+    // own Phase 10, not to be confused with this file's other Phase 10
+    // (content editing) added independently in the same repo. Replaces
+    // the old getMatterContext, which read from the legacy Sheets-backed
+    // database-service -- that call would fail entirely for any matter
+    // created since the Supabase migration, since those matters were
+    // never written to the old Sheet. This reads the same shape of
+    // context directly from Supabase instead. ---
+
+    async getMatterForSlackProvisioning(matterId) {
+      const { ok, body } = await pgFetch(
+        `/matters?id=eq.${matterId}&select=ref_no,client_name,progress_pct,status,project_types(name)`
+      );
+      if (!ok) throw new Error(`Failed to read matter for Slack provisioning: ${JSON.stringify(body)}`);
+      return Array.isArray(body) && body.length > 0 ? body[0] : null;
+    },
+
+    /** Splits a matter's officers into those with a linked Slack account
+     *  (can actually be added to the channel) and those without (get
+     *  named in the channel topic/card as a visible gap instead of
+     *  silently dropped) -- same distinction the original
+     *  officerSlackIdsArray / unresolvedOfficers pair made. */
+    async getMatterOfficersForSlack(matterId) {
+      const { ok, body } = await pgFetch(
+        `/matter_officers?matter_id=eq.${matterId}&select=staff(name,initial,slack_member_id)`
+      );
+      if (!ok) throw new Error(`Failed to read matter_officers for Slack provisioning: ${JSON.stringify(body)}`);
+      const officers = (body || []).map((row) => row.staff).filter(Boolean);
+      return {
+        resolved: officers.filter((o) => o.slack_member_id).map((o) => o.slack_member_id),
+        unresolved: officers.filter((o) => !o.slack_member_id).map((o) => ({ name: o.name, initial: o.initial }))
+      };
+    },
+
     async getProjectType(projectTypeId) {
       const { ok, body } = await pgFetch(`/project_types?id=eq.${projectTypeId}&select=id,name,prefix_digit`);
       if (!ok || !Array.isArray(body) || body.length === 0) return null;
