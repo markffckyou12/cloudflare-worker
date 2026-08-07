@@ -8,7 +8,7 @@
 // =========================================================================
 
 import { jsonResponse, verifyInternalToken } from './shared-http.js';
-import { makeDatabaseClient, makeGithubClient, makeSlackClient, makeSupabaseClient, verifyStaffJwt } from './clients.js';
+import { makeDatabaseClient, makeGithubClient, makeSlackClient, makeSlackApiClient, makeSupabaseClient, verifyStaffJwt } from './clients.js';
 import {
   handleProvisionSlackWorkflow,
   handleRefreshMatterCard,
@@ -97,7 +97,7 @@ async function requireStaff(request, env, supabase) {
   return { staff };
 }
 
-async function routeAdminAction(action, payload, supabase, staff, slack, github, ai) {
+async function routeAdminAction(action, payload, supabase, staff, slack, slackApi, github, ai) {
   if (action === 'deployBlueprints') return handleDeployBlueprints(payload, supabase, staff);
   if (action === 'promoteLeads') return handlePromoteLeads(payload, supabase, staff, slack);
   if (action === 'decodeRef') return handleDecodeRef(payload, supabase);
@@ -120,7 +120,7 @@ async function routeAdminAction(action, payload, supabase, staff, slack, github,
   if (action === 'previewRefNo') return handlePreviewRefNo(payload, supabase);
   if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff, slack);
   // Phase 8
-  if (action === 'updateMatter') return handleUpdateMatter(payload, supabase, staff);
+  if (action === 'updateMatter') return handleUpdateMatter(payload, supabase, staff, slackApi);
   if (action === 'deleteMatter') return handleDeleteMatter(payload, supabase, staff);
   if (action === 'listConfigTaskTemplates') return handleListConfigTaskTemplates(payload, supabase);
   if (action === 'addConfigTaskTemplate') return handleAddConfigTaskTemplate(payload, supabase, staff);
@@ -171,6 +171,7 @@ export default {
 
     const db = makeDatabaseClient(env);
     const slack = makeSlackClient(env);
+    const slackApi = makeSlackApiClient(env);
     const supabase = makeSupabaseClient(env);
     const github = makeGithubClient(env);
 
@@ -179,7 +180,7 @@ export default {
       if (request.method === 'GET') {
         response = await routeGet(request, db, env);
       } else if (request.method === 'POST') {
-        response = await routePost(request, db, slack, supabase, env, github, env.AI);
+        response = await routePost(request, db, slack, slackApi, supabase, env, github, env.AI);
       } else {
         response = jsonResponse({ success: false, message: `Unsupported method: ${request.method}` });
       }
@@ -218,7 +219,7 @@ async function routeGet(request, db, env) {
   return jsonResponse({ success: false, message: `Unknown or missing GET action: "${action}"` });
 }
 
-async function routePost(request, db, slack, supabase, env, github, ai) {
+async function routePost(request, db, slack, slackApi, supabase, env, github, ai) {
   let payload;
   try {
     payload = await request.json();
@@ -233,7 +234,7 @@ async function routePost(request, db, slack, supabase, env, github, ai) {
   if (ADMIN_ACTIONS.has(action)) {
     const authResult = await requireStaff(request, env, supabase);
     if (authResult.error) return authResult.error;
-    return routeAdminAction(action, payload, supabase, authResult.staff, slack, github, ai);
+    return routeAdminAction(action, payload, supabase, authResult.staff, slack, slackApi, github, ai);
   }
 
   // Every other POST action here is service-to-service and requires
