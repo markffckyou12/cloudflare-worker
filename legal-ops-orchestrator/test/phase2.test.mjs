@@ -5,6 +5,7 @@
 // exercises the routing/handlers directly.
 
 import { jest } from '@jest/globals';
+import { SignJWT } from 'jose';
 import worker from '../src/index.js';
 
 const ENV = {
@@ -12,8 +13,19 @@ const ENV = {
   SLACK_SERVICE_EXEC_URL: 'https://script.google.com/macros/s/slack-service/exec',
   INTERNAL_SERVICE_TOKEN: 'test-token-123',
   SUPABASE_URL: 'https://test-project.supabase.co',
-  SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key'
+  SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+  SUPABASE_JWT_SECRET: 'test-jwt-secret-at-least-32-bytes-long!!',
+  SLACK_BOT_TOKEN: 'xoxb-test-bot-token'
 };
+
+async function makeStaffToken(authUserId) {
+  const secret = new TextEncoder().encode(ENV.SUPABASE_JWT_SECRET);
+  return new SignJWT({})
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(authUserId)
+    .setExpirationTime('1h')
+    .sign(secret);
+}
 
 // Responder can return either a plain object/array (old Apps-Script-style
 // tests -- treated as the JSON body, ok:true/status:200 implied) or an
@@ -352,6 +364,110 @@ describe('getPinnedMessageTs', () => {
     const body = await res.json();
     expect(body.success).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('updateMatter officer sync (direct Slack API)', () => {
+  test('invites newly-added officer, removes dropped officer, ignores unchanged one', async () => {
+    const seen = [];
+    const token = await makeStaffToken('auth-user-1');
+
+    mockFetch((url, options) => {
+      const u = String(url);
+      const method = options?.method;
+
+      // Auth: resolve the signed-in staff member.
+      if (u.includes('/rest/v1/staff?auth_user_id=eq.')) {
+        return { __body: [{ id: 1, name: 'Admin', initial: 'ADMIN', is_active: true }] };
+      }
+      // BEFORE state: officers currently on the matter (staff A + staff B, both Slack-linked).
+      if (u.includes('/rest/v1/matter_officers?matter_id=eq.99')) {
+        seen.push('getMatterOfficersForSlack');
+        return { __body: [{ staff: { name: 'A', initial: 'A', slack_member_id: 'U_A' } }, { staff: { name: 'B', initial: 'B', slack_member_id: 'U_B' } }] };
+      }
+      // setMatterOfficers: clear then re-insert.
+      if (u.includes('/rest/v1/matter_officers?matter_id=eq.99') === false && u.includes('/rest/v1/matter_officers') && method === 'DELETE') {
+        seen.push('clearOfficers');
+        return { __body: null };
+      }
+      if (u.includes('/rest/v1/matter_officers') && method === 'POST') {
+        seen.push('insertOfficers');
+        return { __body: null };
+      }
+      // AFTER state resolution: new officer id list -> Slack ids (staff B stays, staff C is new).
+      if (u.includes('/rest/v1/staff?id=in.')) {
+        seen.push('getStaffSlackMemberIds');
+        return { __body: [{ id: 2, slack_member_id: 'U_B' }, { id: 3, slack_member_id: 'U_C' }] };
+      }
+      // Matter lookup for its slack_channel_id.
+      if (u.includes('/rest/v1/matters?id=eq.99&select=ref_no')) {
+        seen.push('getMatterForSlackProvisioning');
+        return { __body: [{ ref_no: 'TP/001', client_name: 'Acme', progress_pct: 50, status: 'Active', slack_channel_id: 'C123', project_types: { name: 'Litigation' } }] };
+      }
+      // Audit log insert.
+      if (u.includes('/rest/v1/audit_log')) return { __body: null };
+
+      // Direct Slack API calls.
+      if (u === 'https://slack.com/api/conversations.invite') {
+        const body = JSON.parse(options.body);
+        expect(body.channel).toBe('C123');
+        expect(body.users).toBe('U_C'); // only the newly-added one
+        seen.push('slackInvite');
+        return { ok: true };
+      }
+      if (u === 'https://slack.com/api/conversations.kick') {
+        const body = JSON.parse(options.body);
+        expect(body.channel).toBe('C123');
+        expect(body.user).toBe('U_A'); // only the dropped one
+        seen.push('slackKick');
+        return { ok: true };
+      }
+      throw new Error(`unexpected call: ${u} ${method || ''}`);
+    });
+
+    const req = new Request('https://worker.example/', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ action: 'updateMatter', matterId: 99, officerStaffIds: [2, 3] }) // drop A(1), keep B(2), add C(3)
+    });
+    const res = await worker.fetch(req, ENV, {});
+    const body = await res.json();
+
+    expect(body.success).toBe(true);
+    expect(seen).toContain('slackInvite');
+    expect(seen).toContain('slackKick');
+    // B (unchanged) never triggers either call -- only the diff does.
+  });
+
+  test('does nothing Slack-side if the matter has no channel yet', async () => {
+    const seen = [];
+    const token = await makeStaffToken('auth-user-1');
+
+    mockFetch((url, options) => {
+      const u = String(url);
+      const method = options?.method;
+      if (u.includes('/rest/v1/staff?auth_user_id=eq.')) return { __body: [{ id: 1, name: 'Admin', initial: 'ADMIN', is_active: true }] };
+      if (u.includes('/rest/v1/matter_officers') && method === 'DELETE') return { __body: null };
+      if (u.includes('/rest/v1/matter_officers') && method === 'POST') return { __body: null };
+      if (u.includes('/rest/v1/matter_officers?matter_id=eq.')) return { __body: [] };
+      if (u.includes('/rest/v1/matters?id=eq.5&select=ref_no')) {
+        return { __body: [{ ref_no: 'TP/002', client_name: 'Beta', progress_pct: 0, status: 'Draft', slack_channel_id: null, project_types: { name: 'Tax' } }] };
+      }
+      if (u.includes('/rest/v1/audit_log')) return { __body: null };
+      if (u.includes('slack.com/api/')) { seen.push('slackCall'); return { ok: true }; }
+      return { __body: null };
+    });
+
+    const req = new Request('https://worker.example/', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ action: 'updateMatter', matterId: 5, officerStaffIds: [2] })
+    });
+    const res = await worker.fetch(req, ENV, {});
+    const body = await res.json();
+
+    expect(body.success).toBe(true);
+    expect(seen).toEqual([]); // no channel -> never touches Slack
   });
 });
 
