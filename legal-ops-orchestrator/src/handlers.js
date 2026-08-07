@@ -352,6 +352,28 @@ export async function handlePreviewRefNo(payload, supabase) {
  * point. It still deploys blueprints if templates DO exist, and reports
  * deployedCount either way so the caller can tell which happened.
  */
+/**
+ * Every new matter gets the designated admin staff member as a default
+ * officer, set BEFORE Slack provisioning runs so they're included in the
+ * initial channel invite the same way any other officer would be --
+ * making "admin ends up in every new channel" an explicit, DB-visible
+ * decision our own system makes, rather than a side effect of whatever
+ * slack-service (the old Apps Script, opaque from this codebase) does
+ * internally. Best-effort: no ADMIN staff row, or the assignment call
+ * failing, shouldn't block matter creation.
+ */
+async function assignDefaultAdminOfficer(supabase, matterId) {
+  try {
+    const admin = await supabase.getStaffByInitial('ADMIN');
+    if (admin) await supabase.setMatterOfficers(matterId, [admin.id]);
+  } catch (err) {
+    await supabase.insertSystemHealthLog({
+      job_name: 'AssignDefaultAdminOfficer', status: 'FAILURE',
+      log_details: `Matter id ${matterId}: failed to assign default admin officer -- ${err.message}`
+    });
+  }
+}
+
 export async function handleCreateMatter(payload, supabase, staff, slack) {
   if (!payload.projectTypeId || !payload.clientName) {
     return jsonResponse({ success: false, message: 'Missing required fields: projectTypeId, clientName.' });
@@ -373,6 +395,7 @@ export async function handleCreateMatter(payload, supabase, staff, slack) {
 
   const deployResult = await deployBlueprintsForMatter(supabase, newMatter.id, payload.projectTypeId);
 
+  await assignDefaultAdminOfficer(supabase, newMatter.id);
   await provisionSlackBestEffort(supabase, slack, newMatter.id, refNo, 'CreateMatter');
 
   await supabase.insertAuditLog({
@@ -394,7 +417,49 @@ export async function handleListMatters(payload, supabase) {
  * is optional -- omit it entirely to leave officer assignments untouched
  * while patching other fields; pass `[]` explicitly to clear all officers.
  */
-export async function handleUpdateMatter(payload, supabase, staff) {
+/**
+ * Best-effort: diffs the old vs new officer Slack IDs and invites/removes
+ * channel members to match. Never blocks or fails the officer save itself
+ * (which already succeeded in Supabase by the time this runs) -- Slack
+ * being unreachable, SLACK_BOT_TOKEN not yet configured, or a member
+ * already being in/out of the channel are all logged, not raised.
+ */
+async function syncOfficersToSlack(supabase, slackApi, matterId, oldSlackIds, newStaffIds) {
+  try {
+    const matter = await supabase.getMatterForSlackProvisioning(matterId);
+    if (!matter || !matter.slack_channel_id) return; // no channel yet -- nothing to sync
+
+    const newSlackIds = new Set(await supabase.getStaffSlackMemberIds(newStaffIds || []));
+    const toInvite = [...newSlackIds].filter((id) => !oldSlackIds.has(id));
+    const toRemove = [...oldSlackIds].filter((id) => !newSlackIds.has(id));
+
+    if (toInvite.length > 0) {
+      const inviteResult = await slackApi.inviteMembers(matter.slack_channel_id, toInvite);
+      if (!inviteResult.ok && inviteResult.error !== 'already_in_channel') {
+        await supabase.insertSystemHealthLog({
+          job_name: 'SyncOfficersToSlack', status: 'FAILURE',
+          log_details: `Matter id ${matterId}: invite failed -- ${inviteResult.error}`
+        });
+      }
+    }
+    for (const slackId of toRemove) {
+      const removeResult = await slackApi.removeMember(matter.slack_channel_id, slackId);
+      if (!removeResult.ok && removeResult.error !== 'not_in_channel') {
+        await supabase.insertSystemHealthLog({
+          job_name: 'SyncOfficersToSlack', status: 'FAILURE',
+          log_details: `Matter id ${matterId}: remove failed for ${slackId} -- ${removeResult.error}`
+        });
+      }
+    }
+  } catch (err) {
+    await supabase.insertSystemHealthLog({
+      job_name: 'SyncOfficersToSlack', status: 'FAILURE',
+      log_details: `Matter id ${matterId}: Slack officer sync threw -- ${err.message}`
+    });
+  }
+}
+
+export async function handleUpdateMatter(payload, supabase, staff, slackApi) {
   if (!payload.matterId) return jsonResponse({ success: false, message: 'Missing required field: matterId.' });
 
   const fields = {};
@@ -411,11 +476,18 @@ export async function handleUpdateMatter(payload, supabase, staff) {
   }
 
   if (payload.officerStaffIds !== undefined) {
+    // Capture the "before" Slack IDs BEFORE setMatterOfficers overwrites
+    // matter_officers -- this is the only chance to know what to remove.
+    const before = await supabase.getMatterOfficersForSlack(payload.matterId);
+    const oldSlackIds = new Set(before.resolved);
+
     try {
       await supabase.setMatterOfficers(payload.matterId, payload.officerStaffIds);
     } catch (err) {
       return jsonResponse({ success: false, message: `Matter fields saved, but officer assignment failed: ${err.message}` });
     }
+
+    await syncOfficersToSlack(supabase, slackApi, payload.matterId, oldSlackIds, payload.officerStaffIds);
   }
 
   await supabase.insertAuditLog({
@@ -925,6 +997,7 @@ async function promoteOneLead(supabase, lead, slack) {
     });
   }
 
+  await assignDefaultAdminOfficer(supabase, newMatter.id);
   await provisionSlackBestEffort(supabase, slack, newMatter.id, refNo, 'PromoteLeadToMatter');
 
   await supabase.updateLead(lead.id, { acknowledge_status: 'Converted', converted_matter_id: newMatter.id });
