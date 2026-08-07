@@ -96,6 +96,53 @@ export function makeSlackClient(env) {
   };
 }
 
+// --- Direct Slack API (Phase 12 for this file's own numbering -- see the
+// note by makeSupabaseClient above about phase numbers colliding across
+// independently-added features in this repo). Bypasses slack-service
+// (the old Apps Script) entirely -- that proxy only ever exposed
+// createChannel/getPinnedMessageTs/updateMatterCard, nothing for channel
+// membership, and it's a black box from this codebase's side (never seen
+// its source). Same pattern legal-ops-slack-fastpath already established
+// for its own Slack calls: hit Slack's Web API directly with a bot
+// token. Needs SLACK_BOT_TOKEN set as a secret on THIS Worker too -- same
+// token value fastpath already uses, just also here, since Cloudflare
+// Worker secrets are scoped per-Worker, not shared across deployments.
+export function makeSlackApiClient(env) {
+  async function call(method, body) {
+    if (!env.SLACK_BOT_TOKEN) {
+      return { ok: false, error: 'slack_bot_token_not_configured' };
+    }
+    const resp = await fetch(`https://slack.com/api/${method}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`
+      },
+      body: JSON.stringify(body)
+    });
+    return resp.json();
+  }
+
+  return {
+    /** conversations.invite takes a comma-separated user list (up to
+     *  1000) -- one call regardless of how many are being added.
+     *  `already_in_channel` is a normal, expected outcome (e.g.
+     *  re-saving the same officer list) -- callers should treat it as
+     *  success, not failure. */
+    async inviteMembers(channelId, slackUserIds) {
+      if (!slackUserIds || slackUserIds.length === 0) return { ok: true };
+      return call('conversations.invite', { channel: channelId, users: slackUserIds.join(',') });
+    },
+
+    /** conversations.kick only supports ONE user per call, unlike invite
+     *  -- caller loops. `not_in_channel` is likewise expected/normal, not
+     *  a real failure. */
+    async removeMember(channelId, slackUserId) {
+      return call('conversations.kick', { channel: channelId, user: slackUserId });
+    }
+  };
+}
+
 // --- Supabase (NEW — Phase 3. Plain PostgREST fetch calls rather than the
 // @supabase/supabase-js SDK, to match this file's existing hand-rolled
 // callService() pattern instead of adding an SDK dependency for one table's
@@ -412,7 +459,7 @@ export function makeSupabaseClient(env) {
 
     async getMatterForSlackProvisioning(matterId) {
       const { ok, body } = await pgFetch(
-        `/matters?id=eq.${matterId}&select=ref_no,client_name,progress_pct,status,project_types(name)`
+        `/matters?id=eq.${matterId}&select=ref_no,client_name,progress_pct,status,slack_channel_id,project_types(name)`
       );
       if (!ok) throw new Error(`Failed to read matter for Slack provisioning: ${JSON.stringify(body)}`);
       return Array.isArray(body) && body.length > 0 ? body[0] : null;
@@ -597,6 +644,18 @@ export function makeSupabaseClient(env) {
       const { ok, body } = await pgFetch(`/staff?initial=eq.${encodeURIComponent(initial)}&select=id,initial`);
       if (!ok || !Array.isArray(body) || body.length === 0) return null;
       return body[0];
+    },
+
+    /** Resolves a list of staff ids to whichever of them have a
+     *  slack_member_id set (silently drops the rest -- same "unresolved
+     *  officer" pattern used elsewhere, staff without a linked Slack
+     *  account just can't be added to a channel). */
+    async getStaffSlackMemberIds(staffIds) {
+      if (!staffIds || staffIds.length === 0) return [];
+      const idList = staffIds.join(',');
+      const { ok, body } = await pgFetch(`/staff?id=in.(${idList})&select=id,slack_member_id`);
+      if (!ok) throw new Error(`Failed to look up staff slack_member_ids: ${JSON.stringify(body)}`);
+      return (body || []).filter((s) => s.slack_member_id).map((s) => s.slack_member_id);
     },
 
     /**
