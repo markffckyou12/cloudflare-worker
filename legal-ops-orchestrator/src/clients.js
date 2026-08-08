@@ -139,6 +139,34 @@ export function makeSlackApiClient(env) {
      *  a real failure. */
     async removeMember(channelId, slackUserId) {
       return call('conversations.kick', { channel: channelId, user: slackUserId });
+    },
+
+    /** Ground truth for "who's actually in this channel right now" --
+     *  used instead of trusting our own matter_officers table as the
+     *  "before" state when diffing who to invite/remove, so a stale or
+     *  incorrect DB snapshot can never cause a redundant invite attempt
+     *  for someone who's already really there. Paginates via cursor
+     *  since conversations.members can return partial pages. */
+    async getChannelMembers(channelId) {
+      const members = [];
+      let cursor;
+      do {
+        const body = { channel: channelId, limit: 200 };
+        if (cursor) body.cursor = cursor;
+        const result = await call('conversations.members', body);
+        if (!result.ok) return { ok: false, error: result.error, members: [] };
+        members.push(...(result.members || []));
+        cursor = result.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+      return { ok: true, members };
+    },
+
+    async setTopic(channelId, topic) {
+      return call('conversations.setTopic', { channel: channelId, topic });
+    },
+
+    async setPurpose(channelId, purpose) {
+      return call('conversations.setPurpose', { channel: channelId, purpose });
     }
   };
 }
@@ -459,7 +487,7 @@ export function makeSupabaseClient(env) {
 
     async getMatterForSlackProvisioning(matterId) {
       const { ok, body } = await pgFetch(
-        `/matters?id=eq.${matterId}&select=ref_no,client_name,progress_pct,status,slack_channel_id,project_types(name)`
+        `/matters?id=eq.${matterId}&select=ref_no,client_name,progress_pct,status,slack_channel_id,slack_message_ts,project_types(name)`
       );
       if (!ok) throw new Error(`Failed to read matter for Slack provisioning: ${JSON.stringify(body)}`);
       return Array.isArray(body) && body.length > 0 ? body[0] : null;
