@@ -99,7 +99,7 @@ async function requireStaff(request, env, supabase) {
 
 async function routeAdminAction(action, payload, supabase, staff, slack, slackApi, github, ai) {
   if (action === 'deployBlueprints') return handleDeployBlueprints(payload, supabase, staff);
-  if (action === 'promoteLeads') return handlePromoteLeads(payload, supabase, staff, slack);
+  if (action === 'promoteLeads') return handlePromoteLeads(payload, supabase, staff, slack, slackApi);
   if (action === 'decodeRef') return handleDecodeRef(payload, supabase);
   if (action === 'sendAck') return handleSendAck(payload, supabase, staff);
   if (action === 'sendProgress') return handleSendProgress(payload, supabase, staff);
@@ -118,9 +118,9 @@ async function routeAdminAction(action, payload, supabase, staff, slack, slackAp
   if (action === 'updateProjectType') return handleUpdateProjectType(payload, supabase, staff);
   if (action === 'deleteProjectType') return handleDeleteProjectType(payload, supabase, staff);
   if (action === 'previewRefNo') return handlePreviewRefNo(payload, supabase);
-  if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff, slack);
+  if (action === 'createMatter') return handleCreateMatter(payload, supabase, staff, slack, slackApi);
   // Phase 8
-  if (action === 'updateMatter') return handleUpdateMatter(payload, supabase, staff, slackApi);
+  if (action === 'updateMatter') return handleUpdateMatter(payload, supabase, staff, slack, slackApi);
   if (action === 'deleteMatter') return handleDeleteMatter(payload, supabase, staff);
   if (action === 'listConfigTaskTemplates') return handleListConfigTaskTemplates(payload, supabase);
   if (action === 'addConfigTaskTemplate') return handleAddConfigTaskTemplate(payload, supabase, staff);
@@ -246,7 +246,7 @@ async function routePost(request, db, slack, slackApi, supabase, env, github, ai
   }
 
   if (action === 'provisionSlackWorkflow') {
-    return handleProvisionSlackWorkflow(payload, supabase, slack, env);
+    return handleProvisionSlackWorkflow(payload, supabase, slack, slackApi, env);
   }
 
   if (action === 'refreshMatterCard') {
